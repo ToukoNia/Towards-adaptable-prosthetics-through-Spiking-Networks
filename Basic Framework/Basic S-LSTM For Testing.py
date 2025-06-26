@@ -1,9 +1,9 @@
 import torch
-from torch.utils.data import TensorDataset
+from torch.nn.utils import weight_norm 
 import torch.nn as nn
 import snntorch as snn
 from snntorch import surrogate
-from torch.utils.data import DataLoader,random_split
+from torch.utils.data import TensorDataset, DataLoader,random_split
 import scipy
 import numpy as np
 from tqdm import tqdm
@@ -14,9 +14,9 @@ numSubjects = 1
 numGestures = 7
 numRepetitions = 12
 numChannels = 14
-numSteps = 2000 # Dataset is sampled at 2000Hz so 1s (might downsample this later)
 batchSize=100
-def loadDataset(mat_paths, batchSize=batchSize, stride=50, numClasses=numGestures): #def better ways to implement this for multi files but i was going quickly
+
+def loadDataset(mat_paths, batchSize=batchSize, stride=50, numClasses=numGestures): #def better ways to implement this for multi files but i was going quickly, also might be worth changing the labels to be like bianry strings or smthing later to reduce overfitting?
     x,y=[],[]
     for mat_path in tqdm(mat_paths, desc="Files"):
         mat = scipy.io.loadmat(mat_path)
@@ -25,8 +25,6 @@ def loadDataset(mat_paths, batchSize=batchSize, stride=50, numClasses=numGesture
         emg = np.delete(emg, [8, 9], axis=1)    #don't contain information
         emg = torch.tensor(emg, dtype=torch.float32)    
         labels = torch.tensor(labels, dtype=torch.long).squeeze()
-        
-        # Normalize EMG
     
         # Sliding window segmentation for batches (idk if this should be done when not doing tdnn work on transhumeral data)
         for i in range(0, emg.shape[0] - batchSize, stride):
@@ -46,8 +44,7 @@ def loadDataset(mat_paths, batchSize=batchSize, stride=50, numClasses=numGesture
     
     return TensorDataset(x, y)
 
-# Hopefully a working basic LSTM model based on the documentation for snn.slstm (Can't test till I make the data loader that I am procrastinating)
-class Net_LSTM(nn.Module):
+class Net_SLSTM(nn.Module):
     def __init__(self, inputSize=numChannels, hiddenSize=128, numClasses=7):
         super().__init__()
         self.hiddenSize = hiddenSize
@@ -55,7 +52,8 @@ class Net_LSTM(nn.Module):
 
         self.slstm1 = snn.SLSTM(inputSize, hiddenSize, spike_grad=surrogate.fast_sigmoid(),learn_threshold=True,reset_mechanism="subtract")
         self.slstm2 = snn.SLSTM(hiddenSize, hiddenSize, spike_grad=surrogate.fast_sigmoid(),learn_threshold=True,reset_mechanism="subtract")
-        self.bn1 = snn.BatchNormTT1d(hiddenSize,time_steps=batchSize)
+        self.bn1 = nn.BatchNorm1d(hiddenSize)
+        self.bn2=nn.BatchNorm1d(hiddenSize)
         self.fc = nn.Linear(hiddenSize, numClasses)   #output
     def forward(self, x):  # x: [time, batch, features]
        
@@ -66,30 +64,91 @@ class Net_LSTM(nn.Module):
         syn2 = torch.zeros(batch_size, self.hiddenSize, device=device)
         mem2 = torch.zeros(batch_size, self.hiddenSize, device=device)
         
-        mem2_rec = []
-
+        mem2Rec = []
+        #spk2rec=[]
         for step in range(x.size(0)):
             spk1, syn1, mem1 = self.slstm1(x[step], syn1, mem1)
-            #spk1 = self.bn1(spk1) # bn1 works correctly on the [batch, hidden] tensor
-            
+            #spk1 = self.bn1(spk1) 
             spk2, syn2, mem2 = self.slstm2(spk1, syn2, mem2)
-            
-            mem2_rec.append(mem2)
-
-        mem2_rec = torch.stack(mem2_rec)
-        final_mem = mem2_rec.mean(dim=0)
-    
-        out = self.fc(final_mem)
+            #spk2=self.bn2(spk2)
+            #spk2rec.append(spk2)
+            mem2Rec.append(mem2)
+        #Gonna try swapping mem2 with spk2 and see if I get increased accuracy next
+        #spk2rec=torch.stack(spk2rec)
+        #finalSpk=spk2rec.mean(dim=0)
+        #out=self.fc(finalSpk)
+        mem2Rec = torch.stack(mem2Rec)
+        finalMem = mem2Rec.mean(dim=0)
+        out = self.fc(finalMem)
         return out
-
-
     
+class STCN_Extractor_Building_Block(nn.Module):
+    def __init__(self,nInputs,nOutputs,kernelSize,stride,dilation,padding):
+        super().__init__()
+        self.conv1 = weight_norm(nn.Conv1d(nInputs, nOutputs, kernelSize,stride=stride, padding=padding, dilation=dilation))
+        self.lif1 = snn.Leaky(beta=0.9, spike_grad=surrogate.fast_sigmoid())
+        self.conv2 = nn.utils.weight_norm(nn.Conv1d(nOutputs, nOutputs, kernelSize,stride=stride, padding=padding, dilation=dilation))
+        self.lif2 = snn.Leaky(beta=0.9, spike_grad=surrogate.fast_sigmoid())
+        self.downsample = nn.Conv1d(nInputs, nOutputs, 1) if nInputs != nOutputs else None
+        self.lif_res = snn.Leaky(beta=0.9, spike_grad=surrogate.fast_sigmoid())
+        
+        self.init_weights()
+
+    def init_weights(self):
+        self.conv1.weight.data.normal_(0, 0.01)
+        self.conv2.weight.data.normal_(0, 0.01)
+        if self.downsample is not None:
+            self.downsample.weight.data.normal_(0, 0.01)
+    
+    def forward(self, x, mem1, mem2, memRes):
+        x=x.unsqueeze(2)
+        spk1, mem1 = self.lif1(self.conv1(x), mem1)
+        spk2, mem2 = self.lif2(self.conv2(spk1), mem2)
+       
+        # Residues
+        res = x if self.downsample is None else self.downsample(x)
+        outRes, memRes = self.lif_res(spk2 + res, memRes)
+        print(1)
+        return outRes.squeeze(2), mem1, mem2, memRes
+
+class STCN_Assembled(nn.Module): #channels are called stages to reduce confusion with electrode channels, and because I was listening to a song about putting on a preformance whilst coding
+    def __init__(self,nInputs,nStages,nGestures,kernelSize=2):
+        super().__init__()
+        layers=[]
+        for i in range(len(nStages)):
+            dilations=2**i
+            inStage=nInputs if i==0 else nStages[i-1]
+            outStage=nStages[i]
+            layers.append(STCN_Extractor_Building_Block(inStage,outStage,kernelSize,stride=1,dilation=dilations,padding=(kernelSize-1)*dilations))
+        self.net = nn.ModuleList(layers)
+        self.fc=nn.Linear(nStages[-1],nGestures)
+    def forward(self, x):
+        memFwd = [None] * len(self.net) * 3  # 3 LIF neurons per block
+        out = []
+
+        # Temporal loop
+        for t in range(x.size(0)):
+            xt = x[t]
+            
+            mem_idx = 0
+            for i, layer in enumerate(self.net):
+                xt, mem1out, mem2out, memResOut = layer(xt, memFwd[mem_idx], memFwd[mem_idx+1], memFwd[mem_idx+2])
+                memFwd[mem_idx], memFwd[mem_idx+1], memFwd[mem_idx+2] = mem1out, mem2out, memResOut
+                mem_idx += 3
+          
+            out.append(xt)
+        out=torch.stack(out, dim=1)
+        rateCode= torch.sum(out, dim=1)
+        out=self.fc(rateCode)
+        return out
+    
+
 num_epochs=5
 TESTTHRESHOLD=0.25
 
 device = torch.device("cuda") if torch.cuda.is_available() else torch.device("mps") if torch.backends.mps.is_available() else torch.device("cpu")
-model=Net_LSTM().to(device)
-#model=Net_TCN(numChannels,numGestures).to(device) idk where this model dissapeared to, i need to find it
+#model=STCN_Assembled(numChannels,[32, 32, 64, 64],numGestures).to(device)
+model=Net_SLSTM().to(device)
 
 data_directory = r'C:\Users\Nia Touko\Downloads\DB6_s1_a'
 
@@ -100,20 +159,27 @@ if not mat_file_paths:
    raise ValueError("No .mat files found in this directory, please double check and try again :)")
     
 
+
+
+
+#Isolates training and testing data, and shuffles the training (not the testing to simulate real world )
 data=loadDataset(mat_file_paths)
 testSize=int(len(data)*TESTTHRESHOLD)
 trainSize=len(data)-testSize
 trainData,testData=random_split(data,[trainSize,testSize])
+trainLoader=DataLoader(trainData, batch_size=batchSize, shuffle=True)
+testLoader=DataLoader(testData,batch_size=batchSize,shuffle=False)
+
+#Training Settings
 loss_fn = nn.CrossEntropyLoss()
 optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
 losses=[]
-trainLoader=DataLoader(trainData, batch_size=batchSize, shuffle=True)
-testLoader=DataLoader(testData,batch_size=batchSize,shuffle=False)
+
 for epoch in range(num_epochs):
     model.train()
     totalLoss = 0
     correctPredictions=0
-    loop = tqdm(trainLoader, desc=f"Epoch {epoch+1}/{num_epochs}", leave=True)
+    loop = tqdm(trainLoader, desc=f"Epoch {epoch+1}/{num_epochs}", leave=False)
     for x, y in trainLoader:
         x = x.permute(1, 0, 2)
         x, y = x.to(device), y.to(device)
@@ -123,7 +189,6 @@ for epoch in range(num_epochs):
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
-
         totalLoss += loss.item()
         loop.update(1)
         _, predictions = torch.max(output, 1)
@@ -150,5 +215,5 @@ with torch.no_grad():
         currentTestAccuracy = (correctPredictions / (testLoop.n+1))
         testLoop.set_postfix(loss=loss.item(), acc=f"{currentTestAccuracy:.2f}%")
         
-    print(f"Total loss is {testLoss/len(testLoader):.4f} and your final accuracy is {currentTestAccuracy:.4f}, compared to your final training loss of {losses[-1]:.4f} and {currentAccuracy:.4f} ")
+    print(f"Total loss is {testLoss/len(testLoader):.4f} and your final accuracy is {currentTestAccuracy:.4f}%, compared to your final training loss of {losses[-1]:.4f} and accurcay {currentAccuracy:.4f}% ")
     
