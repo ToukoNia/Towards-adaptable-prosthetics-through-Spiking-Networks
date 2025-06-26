@@ -14,9 +14,9 @@ numSubjects = 1
 numGestures = 7
 numRepetitions = 12
 numChannels = 14
-batchSize=100
+windowSize=100
 
-def loadDataset(mat_paths, batchSize=batchSize, stride=50, numClasses=numGestures): #def better ways to implement this for multi files but i was going quickly, also might be worth changing the labels to be like bianry strings or smthing later to reduce overfitting?
+def loadDataset(mat_paths, windowSize=windowSize, stride=50, numClasses=numGestures): #def better ways to implement this for multi files but i was going quickly, also might be worth changing the labels to be like bianry strings or smthing later to reduce overfitting?
     x,y=[],[]
     for mat_path in tqdm(mat_paths, desc="Files"):
         mat = scipy.io.loadmat(mat_path)
@@ -27,9 +27,9 @@ def loadDataset(mat_paths, batchSize=batchSize, stride=50, numClasses=numGesture
         labels = torch.tensor(labels, dtype=torch.long).squeeze()
     
         # Sliding window segmentation for batches (idk if this should be done when not doing tdnn work on transhumeral data)
-        for i in range(0, emg.shape[0] - batchSize, stride):
-            segment = emg[i:i+batchSize]              # [window_size, channels]
-            label_window = labels[i:i+batchSize]
+        for i in range(0, emg.shape[0] - windowSize, stride):
+            segment = emg[i:i+windowSize]              # [window_size, channels]
+            label_window = labels[i:i+windowSize]
             label = int((torch.mode(label_window)[0])/2)    #floors it after dividing by 2 bc 2 sets of the same gesture created per thingy
             x.append(segment)
             y.append(label)
@@ -52,26 +52,25 @@ class Net_SLSTM(nn.Module):
         self.slstm1 = snn.SLSTM(inputSize, hiddenSize, spike_grad=surrogate.fast_sigmoid(),learn_threshold=True,reset_mechanism="subtract")
         self.slstm2 = snn.SLSTM(hiddenSize, hiddenSize, spike_grad=surrogate.fast_sigmoid(),learn_threshold=True,reset_mechanism="subtract")
         self.bn1 = nn.BatchNorm1d(hiddenSize)
-        self.bn2=nn.BatchNorm1d(hiddenSize)
         self.fc = nn.Linear(hiddenSize, numClasses)   #output
     def forward(self, x):  # x: [time, batch, features]
-       
-        batch_size = x.size(1)
-        device = x.device
-        syn1 = torch.zeros(batch_size, self.hiddenSize, device=device)  #this instead of mem_reset() because I was running into issues with wrong number of samples in certain batch sizes
-        mem1 = torch.zeros(batch_size, self.hiddenSize, device=device)
-        syn2 = torch.zeros(batch_size, self.hiddenSize, device=device)
-        mem2 = torch.zeros(batch_size, self.hiddenSize, device=device)
-        
+        syn1, mem1 = self.slstm1.init_slstm()
+        syn2, mem2 = self.slstm2.init_slstm()
         mem2Rec = []
-        #spk2rec=[]
+        spk1Rec=[]
         for step in range(x.size(0)):
             spk1, syn1, mem1 = self.slstm1(x[step], syn1, mem1)
             #spk1 = self.bn1(spk1) 
-            spk2, syn2, mem2 = self.slstm2(spk1, syn2, mem2)
-            #spk2=self.bn2(spk2)
-            #spk2rec.append(spk2)
+            spk1Rec.append(spk1)
+        spk1Rec=torch.stack(spk1Rec)
+        tSteps,bSize,nFeatures=spk1Rec.shape
+        spk1Flat=spk1Rec.view(tSteps*bSize,nFeatures)
+        spk1NormFlat=self.bn1(spk1Flat)
+        spk1NormRec=spk1NormFlat.view(tSteps,bSize,nFeatures)
+        for step in range(x.size(0)):
+            spk2, syn2, mem2 = self.slstm2(spk1NormRec[step], syn2, mem2)
             mem2Rec.append(mem2)
+            
         #Gonna try swapping mem2 with spk2 and see if I get increased accuracy next
         #spk2rec=torch.stack(spk2rec)
         #finalSpk=spk2rec.mean(dim=0)
@@ -125,8 +124,7 @@ class STCN_Assembled(nn.Module): #channels are called stages to reduce confusion
         
         # Temporal loop
         for t in range(x.size(0)):
-            xt = x[t]
-            
+            xt = x[t]   
             mem_idx = 0
             for i, layer in enumerate(self.net):
                 if (i==0):
@@ -137,80 +135,80 @@ class STCN_Assembled(nn.Module): #channels are called stages to reduce confusion
             out.append(xt)
         out=torch.stack(out, dim=1)
         rateCode= torch.sum(out, dim=1)
+        '''
         batch_size = rateCode.size(0)
         rateCode_flat = rateCode.view(batch_size, -1)
-        out=self.fc(rateCode_flat)
+        '''
+        out=self.fc(rateCode)
         return out
     def reset(self):
        for layer in self.modules():
            if hasattr(layer, 'reset_mem'):
                layer.reset_mem()
     
+def fileFinder(dataDirectory):
+    searchPattern = os.path.join(dataDirectory, '*.mat')
+    matFilePaths = glob.glob(searchPattern)  #idk how good glob is but it made this way simpler so... ill revisit it later
+
+    if not matFilePaths:
+       raise ValueError("No .mat files found in this directory, please double check and try again :)")
+        
+    return matFilePaths
 
 num_epochs=5
 TESTTHRESHOLD=0.25
 
 device = torch.device("cuda") if torch.cuda.is_available() else torch.device("mps") if torch.backends.mps.is_available() else torch.device("cpu")
-model=STCN_Assembled(numChannels,[32, 32, 64, 64],numGestures).to(device)
-#model=Net_SLSTM().to(device)
+#model=STCN_Assembled(numChannels,[32, 32, 64, 64],numGestures).to(device)
+model=Net_SLSTM().to(device)
+ 
+matFilePaths=fileFinder(r'C:\Users\Nia Touko\Downloads\DB6_s1_a')
+testMatFilePaths=fileFinder(r'C:\Users\Nia Touko\Downloads\DB6_s1_b')
 
-data_directory = r'C:\Users\Nia Touko\Downloads\DB6_s1_a'
 
-search_pattern = os.path.join(data_directory, '*.mat')
-mat_file_paths = glob.glob(search_pattern)  #idk how good glob is but it made this way simpler so... ill revisit it later
-
-if not mat_file_paths:
-   raise ValueError("No .mat files found in this directory, please double check and try again :)")
-    
-data_directory = r'C:\Users\Nia Touko\Downloads\DB6_s1_b'
-
-search_pattern = os.path.join(data_directory, '*.mat')
-test_mat_file_paths = glob.glob(search_pattern)  #idk how good glob is but it made this way simpler so... ill revisit it later
-
-if not test_mat_file_paths:
-   raise ValueError("No .mat files found in this directory, please double check and try again :)")
-
-mat_file_paths.append(test_mat_file_paths.pop(0))
+matFilePaths.append(testMatFilePaths.pop(0))
 
 #Isolates training and testing data, and shuffles the training (not the testing to simulate real world )
-trainData=loadDataset(mat_file_paths)
-testData=loadDataset(test_mat_file_paths)
+trainData=loadDataset(matFilePaths)
+testData=loadDataset(testMatFilePaths)
 '''
 data=loadDataset(mat_file_paths)
 testSize=int(len(data)*TESTTHRESHOLD)
 trainSize=len(data)-testSize
 trainData,testData=random_split(data,[trainSize,testSize])
 '''
-trainLoader=DataLoader(trainData, batch_size=batchSize, shuffle=True)
-testLoader=DataLoader(testData,batch_size=batchSize,shuffle=False)
+trainLoader=DataLoader(trainData, batch_size=windowSize, shuffle=True)
+testLoader=DataLoader(testData,batch_size=windowSize,shuffle=False)
 
 #Training Settings
 loss_fn = nn.CrossEntropyLoss()
 optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
 losses=[]
-
+accuracies=[]
 for epoch in range(num_epochs):
     model.train()
     totalLoss = 0
     correctPredictions=0
-    loop = tqdm(trainLoader, desc=f"Epoch {epoch+1}/{num_epochs}", leave=False)
-    for x, y in trainLoader:
-        x = x.permute(1, 0, 2)
+    loop = tqdm(trainLoader, desc=f"Epoch {epoch+1}/{num_epochs}", leave=False) #pretty little progress bar
+    for x, y in trainLoader:    #loops through trainloader
+        #Data is moved to the right place
+        x = x.permute(1,0,2)
         x, y = x.to(device), y.to(device)
-        model.reset()
+        #model.reset()   #resets the membrane potential of the LIF neurons (is only needed for the S-TCN architecute)
         output = model(x)
-
+        #calculates the training values
         loss = loss_fn(output, y)
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
+        #updates the readOuts
         totalLoss += loss.item()
         loop.update(1)
         _, predictions = torch.max(output, 1)
         correctPredictions += (predictions == y).sum().item()
         currentAccuracy = (correctPredictions / loop.n)
         loop.set_postfix(loss=loss.item(), acc=f"{currentAccuracy:.2f}%")
-        
+    accuracies.append(currentAccuracy)
     losses.append(totalLoss / len(trainLoader))
     print(f"Epoch {epoch+1}: Loss = {losses[-1]:.4f}")
 
@@ -222,7 +220,7 @@ with torch.no_grad():
     for x,y in testLoop:
         x=x.permute(1,0,2)
         x,y=x.to(device),y.to(device)
-        model.reset()
+        #model.reset()
         output=model(x)
         loss = loss_fn(output, y)
         _, predictions = torch.max(output, 1)
