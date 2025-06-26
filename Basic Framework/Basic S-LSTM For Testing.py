@@ -33,7 +33,6 @@ def loadDataset(mat_paths, batchSize=batchSize, stride=50, numClasses=numGesture
             label = int((torch.mode(label_window)[0])/2)    #floors it after dividing by 2 bc 2 sets of the same gesture created per thingy
             x.append(segment)
             y.append(label)
-        print(len(y))
     x = torch.stack(x)    # [num_samples, window_size, num_channels]
     y = torch.tensor(y)   # [num_samples]
  
@@ -83,11 +82,11 @@ class Net_SLSTM(nn.Module):
         return out
     
 class STCN_Extractor_Building_Block(nn.Module):
-    def __init__(self,nInputs,nOutputs,kernelSize,stride,dilation,padding):
+    def __init__(self,nInputs,nOutputs,kernelSize,stride,dilation):
         super().__init__()
-        self.conv1 = weight_norm(nn.Conv1d(nInputs, nOutputs, kernelSize,stride=stride, padding=padding, dilation=dilation))
+        self.conv1 = weight_norm(nn.Conv1d(nInputs, nOutputs, kernelSize,stride=stride, dilation=dilation,padding='same'))
         self.lif1 = snn.Leaky(beta=0.9, spike_grad=surrogate.fast_sigmoid())
-        self.conv2 = nn.utils.weight_norm(nn.Conv1d(nOutputs, nOutputs, kernelSize,stride=stride, padding=padding, dilation=dilation))
+        self.conv2 = nn.utils.weight_norm(nn.Conv1d(nOutputs, nOutputs, kernelSize,stride=stride, padding='same', dilation=dilation))
         self.lif2 = snn.Leaky(beta=0.9, spike_grad=surrogate.fast_sigmoid())
         self.downsample = nn.Conv1d(nInputs, nOutputs, 1) if nInputs != nOutputs else None
         self.lif_res = snn.Leaky(beta=0.9, spike_grad=surrogate.fast_sigmoid())
@@ -101,15 +100,13 @@ class STCN_Extractor_Building_Block(nn.Module):
             self.downsample.weight.data.normal_(0, 0.01)
     
     def forward(self, x, mem1, mem2, memRes):
-        x=x.unsqueeze(2)
         spk1, mem1 = self.lif1(self.conv1(x), mem1)
         spk2, mem2 = self.lif2(self.conv2(spk1), mem2)
        
         # Residues
         res = x if self.downsample is None else self.downsample(x)
         outRes, memRes = self.lif_res(spk2 + res, memRes)
-        print(1)
-        return outRes.squeeze(2), mem1, mem2, memRes
+        return outRes, mem1, mem2, memRes
 
 class STCN_Assembled(nn.Module): #channels are called stages to reduce confusion with electrode channels, and because I was listening to a song about putting on a preformance whilst coding
     def __init__(self,nInputs,nStages,nGestures,kernelSize=2):
@@ -119,36 +116,43 @@ class STCN_Assembled(nn.Module): #channels are called stages to reduce confusion
             dilations=2**i
             inStage=nInputs if i==0 else nStages[i-1]
             outStage=nStages[i]
-            layers.append(STCN_Extractor_Building_Block(inStage,outStage,kernelSize,stride=1,dilation=dilations,padding=(kernelSize-1)*dilations))
+            layers.append(STCN_Extractor_Building_Block(inStage,outStage,kernelSize,stride=1,dilation=dilations))
         self.net = nn.ModuleList(layers)
         self.fc=nn.Linear(nStages[-1],nGestures)
     def forward(self, x):
         memFwd = [None] * len(self.net) * 3  # 3 LIF neurons per block
         out = []
-
+        
         # Temporal loop
         for t in range(x.size(0)):
             xt = x[t]
             
             mem_idx = 0
             for i, layer in enumerate(self.net):
+                if (i==0):
+                    xt=xt.unsqueeze(2)
                 xt, mem1out, mem2out, memResOut = layer(xt, memFwd[mem_idx], memFwd[mem_idx+1], memFwd[mem_idx+2])
                 memFwd[mem_idx], memFwd[mem_idx+1], memFwd[mem_idx+2] = mem1out, mem2out, memResOut
                 mem_idx += 3
-          
             out.append(xt)
         out=torch.stack(out, dim=1)
         rateCode= torch.sum(out, dim=1)
-        out=self.fc(rateCode)
+        batch_size = rateCode.size(0)
+        rateCode_flat = rateCode.view(batch_size, -1)
+        out=self.fc(rateCode_flat)
         return out
+    def reset(self):
+       for layer in self.modules():
+           if hasattr(layer, 'reset_mem'):
+               layer.reset_mem()
     
 
 num_epochs=5
 TESTTHRESHOLD=0.25
 
 device = torch.device("cuda") if torch.cuda.is_available() else torch.device("mps") if torch.backends.mps.is_available() else torch.device("cpu")
-#model=STCN_Assembled(numChannels,[32, 32, 64, 64],numGestures).to(device)
-model=Net_SLSTM().to(device)
+model=STCN_Assembled(numChannels,[32, 32, 64, 64],numGestures).to(device)
+#model=Net_SLSTM().to(device)
 
 data_directory = r'C:\Users\Nia Touko\Downloads\DB6_s1_a'
 
@@ -158,15 +162,25 @@ mat_file_paths = glob.glob(search_pattern)  #idk how good glob is but it made th
 if not mat_file_paths:
    raise ValueError("No .mat files found in this directory, please double check and try again :)")
     
+data_directory = r'C:\Users\Nia Touko\Downloads\DB6_s1_b'
 
+search_pattern = os.path.join(data_directory, '*.mat')
+test_mat_file_paths = glob.glob(search_pattern)  #idk how good glob is but it made this way simpler so... ill revisit it later
 
+if not test_mat_file_paths:
+   raise ValueError("No .mat files found in this directory, please double check and try again :)")
 
+mat_file_paths.append(test_mat_file_paths.pop(0))
 
 #Isolates training and testing data, and shuffles the training (not the testing to simulate real world )
+trainData=loadDataset(mat_file_paths)
+testData=loadDataset(test_mat_file_paths)
+'''
 data=loadDataset(mat_file_paths)
 testSize=int(len(data)*TESTTHRESHOLD)
 trainSize=len(data)-testSize
 trainData,testData=random_split(data,[trainSize,testSize])
+'''
 trainLoader=DataLoader(trainData, batch_size=batchSize, shuffle=True)
 testLoader=DataLoader(testData,batch_size=batchSize,shuffle=False)
 
@@ -183,6 +197,7 @@ for epoch in range(num_epochs):
     for x, y in trainLoader:
         x = x.permute(1, 0, 2)
         x, y = x.to(device), y.to(device)
+        model.reset()
         output = model(x)
 
         loss = loss_fn(output, y)
@@ -207,6 +222,7 @@ with torch.no_grad():
     for x,y in testLoop:
         x=x.permute(1,0,2)
         x,y=x.to(device),y.to(device)
+        model.reset()
         output=model(x)
         loss = loss_fn(output, y)
         _, predictions = torch.max(output, 1)
