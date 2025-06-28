@@ -57,29 +57,29 @@ class Net_SLSTM(nn.Module):
         super().__init__()
         self.hiddenSize = hiddenSize
         self.numClasses = numClasses
-        '''
+        
         self.conv1 = nn.Conv1d(in_channels=numChannels, out_channels=32, kernel_size=3, padding=1)
         self.lif1 = snn.Leaky(beta=0.9) # A simple spiking neuron layer
-        '''
-        self.slstm1 = snn.SLSTM(inputSize, hiddenSize, spike_grad=surrogate.fast_sigmoid(),learn_threshold=True,reset_mechanism="subtract")
+        
+        self.slstm1 = snn.SLSTM(32, hiddenSize, spike_grad=surrogate.fast_sigmoid(),learn_threshold=True,reset_mechanism="subtract")
         self.slstm2 = snn.SLSTM(hiddenSize, hiddenSize, spike_grad=surrogate.fast_sigmoid(),learn_threshold=True,reset_mechanism="subtract")
         self.bn1 = nn.BatchNorm1d(hiddenSize)
         #self.bn2 = nn.BatchNorm1d(hiddenSize)
         self.fc = nn.Linear(hiddenSize, numClasses)   #output
     def forward(self, x):  # x: [time, batch, features]
-        '''    
+        
         self.lif1.reset_mem()
         x=x.permute(0,2,1)
         cur1spk,cur1mem = self.lif1(self.conv1(x))
-        cur1=cur1spk.permute(2,0,1)
-        '''
+        cur1=cur1spk.permute(0,2,1)
+        print(cur1.shape)
         syn1, mem1 = self.slstm1.init_slstm()
         syn2, mem2 = self.slstm2.init_slstm()
         mem2Rec = []
         spk1Rec=[]
         #spk2Rec=[]
         for step in range(x.size(0)):
-            spk1, syn1, mem1 = self.slstm1(x[step], syn1, mem1)
+            spk1, syn1, mem1 = self.slstm1(cur1[step], syn1, mem1)
             spk1Rec.append(spk1)
         
         #TAB 
@@ -176,8 +176,8 @@ device = torch.device("cuda") if torch.cuda.is_available() else torch.device("mp
 #model=STCN_Assembled(numChannels,[32, 32, 64, 64],numGestures).to(device)
 model=Net_SLSTM().to(device)
  
-matFilePaths=fileFinder(r'C:\Users\Nia Touko\Downloads\DB6_s1_a')
-testMatFilePaths=fileFinder(r'C:\Users\Nia Touko\Downloads\DB6_s1_b')
+matFilePaths=fileFinder(r'C:\Users\touko\Downloads\DB6_s1_a')
+testMatFilePaths=fileFinder(r'C:\Users\touko\Downloads\DB6_s1_b')
 
 
 matFilePaths.append(testMatFilePaths.pop(0))
