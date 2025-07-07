@@ -10,6 +10,7 @@ import torch.nn as nn
 import snntorch as snn
 from snntorch import surrogate
 
+
    
 class STCN_Extractor_Building_Block(nn.Module):
    def __init__(self,nInputs,nOutputs,kernelSize,stride,dilation):
