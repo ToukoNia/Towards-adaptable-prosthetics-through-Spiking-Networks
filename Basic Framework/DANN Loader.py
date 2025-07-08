@@ -6,12 +6,8 @@ Created on Tue Jul  1 22:51:23 2025
 """
 
 import torch
-from torch.nn.utils import weight_norm 
 import torch.nn as nn
-import snntorch as snn
-from snntorch import surrogate
 from torch.utils.data import TensorDataset, DataLoader      #,random_split
-from snntorch import spikegen
 import scipy
 import numpy as np
 from tqdm import tqdm
@@ -19,6 +15,7 @@ import glob
 import os
 from SCLSTM_DANN_Model import S_CLSTM_DANN
 import re 
+import pandas as pd
 # Data parameters
 numSubjects = 1  
 numGestures = 8
@@ -105,12 +102,12 @@ def trainNetwork(model,trainLoader,numEpochs,optimizer):
             loss.backward()
             optimizer.step()
             #updates the readOuts
-            totalLoss += loss.item()
+            totalLoss += lossGesture.item()
             loop.update(1)
             _, predictions = torch.max(gestureOutput, 1)
             correctPredictions += (predictions == y).sum().item()
             currentAccuracy = (correctPredictions / loop.n)
-            loop.set_postfix(loss=loss.item(), acc=f"{currentAccuracy:.2f}%")
+            loop.set_postfix(loss=lossGesture.item(), acc=f"{currentAccuracy:.2f}%")
         accuracies.append(currentAccuracy)
         losses.append(totalLoss / len(trainLoader))
         print(f"Epoch {epoch+1}: Loss = {losses[-1]:.4f}")
@@ -137,22 +134,21 @@ def testNetwork(model, testLoader,optimizer):
         return testLoss, correctPredictions
        
 
-numEpochs=3
+numEpochs=8
 batchSize=128
-
 
 device = torch.device("cuda") if torch.cuda.is_available() else torch.device("mps") if torch.backends.mps.is_available() else torch.device("cpu")
 #model=STCN_Assembled(numChannels,[32, 32, 64, 64],numGestures).to(device)
 
 
-def LOSO(): #iterates through all the subjects, leaving one out to test how it adapts to unseen users (and reduces erronous data from individual people)
+def LOSO(): #Leave one subject out: iterates through all the subjects, leaving one out to test how it adapts to unseen users (and reduces erronous data from individual people)
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("mps") if torch.backends.mps.is_available() else torch.device("cpu")
     matFilePaths=[]
     SUBJECT_IDs=[1,2,3,4,5,6,7,8,9,10]
     results = {}
     for i in range(1,11):
         matFilePaths+=fileFinder(r'..\Data\DB6_s%s_a' % i)+fileFinder(r'..\Data\DB6_s%s_b' % i)
-    for i in range(0,10):
+    for i in range(0,1):
         #sets up the data
         trainSubjectIDs=SUBJECT_IDs
         testSubject=trainSubjectIDs.pop(i)
@@ -186,7 +182,19 @@ def LOSO(): #iterates through all the subjects, leaving one out to test how it a
             "testing_accuracy": testAccuracy,
             "testing_loss": testLoss,
         }
-        return results
+        torch.save(model,r'Subject%sLeftOut' % i)
+    print("\nCross-validation finished. Saving final results...")
+    
+    # Save as a CSV file 
+    resultsDF = pd.DataFrame.from_dict(results, orient='index')
+    resultsDF.index.name = 'Fold'
+    # Calculate and add average results (to easily see how valid a model is)
+    mean_results = resultsDF.mean()
+    resultsDF.loc['Average'] = mean_results
+    resultsDF.to_csv('LOSO_DANN_Results.csv')
+    
+    print("Final results saved to LOSO_DANN_Results.csv")
+    return results
              
 
 lossGestureFn = nn.CrossEntropyLoss()

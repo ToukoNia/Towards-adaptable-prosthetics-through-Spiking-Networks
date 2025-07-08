@@ -1,33 +1,41 @@
 # -*- coding: utf-8 -*-
 """
-Created on Fri Jun 27 20:23:22 2025
+Created on Tue Jul  8 18:15:53 2025
 
 @author: Nia Touko
 """
 
+#Modified standard loader but for the supercomputer, single subject testing
+
+
 import torch
 import torch.nn as nn
-from torch.utils.data import TensorDataset, DataLoader      #,random_split
+from torch.utils.data import TensorDataset, DataLoader,random_split
 from snntorch import spikegen
 import scipy
 import numpy as np
-from tqdm import tqdm
 import glob
 import os
-from S_LSTM_Model import Net_SLSTM_TempAtten
+from S_LSTM_Model import Net_SLSTM as Net
+import sys
+import pandas as pd
+import matplotlib.pyplot as plt
+
 # Data parameters
 numSubjects = 1  
 numGestures = 8
 numRepetitions = 12
 numChannels = 14
 windowSize=400
-
+TESTTHRESHOLD=0.3
+#inp = int(float(sys.argv[1])-1)
+inp=1
 def loadDataset(mat_paths, windowSize=windowSize, overlapR=0.5, numClasses=numGestures,doEncode=0): #def better ways to implement this for multi files but i was going quickly, also might be worth changing the labels to be like bianry strings or smthing later to reduce overfitting?
     x,y=[],[]
     stride=int((1-overlapR)*windowSize)
     targetLabels = [0, 1, 3, 4, 6, 9, 10, 11]
     labelMap = {label: i for i, label in enumerate(targetLabels)}
-    for mat_path in tqdm(mat_paths, desc="Files"):
+    for mat_path in mat_paths:
         mat = scipy.io.loadmat(mat_path)
         emg = mat['emg']             
         labels = mat['restimulus']   
@@ -64,16 +72,18 @@ def fileFinder(dataDirectory):
         
     return matFilePaths
 
-def trainNetwork(model,trainLoader,numEpochs,loss_fn,optimiser,doReset):
+def trainNetwork(model,trainLoader,testLoader1,testLoader2,numEpochs,loss_fn,optimiser,doReset):
     #Training Settings
+    history = {
+       'train_loss': [], 'train_acc': [],
+       'intra_session_loss': [], 'intra_session_acc': [],
+       'inter_session_loss': [], 'inter_session_acc': []
+   }
 
-    losses=[]
-    accuracies=[]
     for epoch in range(numEpochs):
         model.train()
         totalLoss = 0
         correctPredictions=0
-        loop = tqdm(trainLoader, desc=f"Epoch {epoch+1}/{numEpochs}", leave=False) #pretty little progress bar
         for x, y in trainLoader:    #loops through trainloader
             #Data is moved to the right place
             x = x.permute(1,0,2)
@@ -89,40 +99,29 @@ def trainNetwork(model,trainLoader,numEpochs,loss_fn,optimiser,doReset):
             
             #updates the readOuts
             totalLoss += loss.item()
-            loop.update(1)
             _, predictions = torch.max(output, 1)
             correctPredictions += (predictions == y).sum().item()
-            currentAccuracy = (correctPredictions / loop.n)
-            loop.set_postfix(loss=loss.item(), acc=f"{currentAccuracy:.2f}%")
-        accuracies.append(currentAccuracy)
-        losses.append(totalLoss / len(trainLoader))
-        print(f"Epoch {epoch+1}: Loss = {losses[-1]:.4f}")
-    return losses, accuracies
+        currentAccuracy = (correctPredictions / len(trainLoader.dataset))*100
+        history['train_loss'].append(totalLoss / len(trainLoader))
+        history['train_acc'].append(currentAccuracy)
 
-def testNetwork(model, testLoader,loss_fn,optimiser,doReset):
+        
+        testAccuracyIntra,testLossIntra=testNetwork(model,testLoader1,loss_fn,0)
+        testAccuracyInter,testLossInter =testNetwork(model,testLoader2,loss_fn,0)
+        
+        history['intra_session_acc'].append(testAccuracyIntra)
+        history['intra_session_loss'].append(testLossIntra)
+        history['inter_session_acc'].append(testAccuracyInter)
+        history['inter_session_loss'].append(testLossInter)
+        
+    return history
+
+def testNetwork(model, testLoader,loss_fn,doReset):
     model.eval()
-    testLoss=0
-    totalLoss=0
-    correctPredictions=0
     with torch.no_grad():
-        loop = tqdm(trainLoader, desc="Testing on seen", leave=False) #pretty little progress bar
-        for x,y in trainLoader:
-            x=x.permute(1,0,2)
-            x,y=x.to(device),y.to(device)
-            if doReset:
-                model.reset()   #resets the membrane potential of the LIF neurons (is only needed for the S-TCN architecute)
-            output=model(x)
-            loss = loss_fn(output, y)
-            _, predictions = torch.max(output, 1)
-            totalLoss += loss.item()
-            loop.update(1)
-            correctPredictions += (predictions == y).sum().item()
-            currentAccuracy = (correctPredictions / loop.n)
-            loop.set_postfix(loss=loss.item(), acc=f"{currentAccuracy:.2f}%")
-        testLoop = tqdm(testLoader, desc="Testing on unseen  ", leave=False)
         correctPredictions=0
-        i=0
-        for x,y in testLoop:
+        testLoss=0
+        for x,y in testLoader:
             x=x.permute(1,0,2)
             x,y=x.to(device),y.to(device)
             if doReset:
@@ -131,30 +130,67 @@ def testNetwork(model, testLoader,loss_fn,optimiser,doReset):
             loss = loss_fn(output, y)
             _, predictions = torch.max(output, 1)
             testLoss+=loss.item()
-            i+=1
             correctPredictions += (predictions == y).sum().item()
-            currentTestAccuracy = (correctPredictions /i)
-            testLoop.set_postfix(loss=loss.item(), acc=f"{currentTestAccuracy:.2f}%")
-            
-        print(f"Total loss is {testLoss/len(testLoader):.4f} and your final accuracy is {correctPredictions/len(testLoader):.4f}%, compared to your final training loss of {loss.item():.4f} and accurcay {currentAccuracy:.4f}% ")
+        testAccuracy=100*correctPredictions/len(testLoader.dataset)
+        testLoss=testLoss / len(testLoader)
+        return testAccuracy,testLoss
         
-def LOSO(model,loss_fn):
-    device = torch.device("cuda") if torch.cuda.is_available() else torch.device("mps") if torch.backends.mps.is_available() else torch.device("cpu")
+def plot_results(history, subject_id):
+    """Plots training and validation metrics and saves the figure."""
+    df = pd.DataFrame(history)
+    
+    plt.style.use('seaborn-v0_8-whitegrid')
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
+    
+    # Plotting Loss
+    ax1.plot(df['train_loss'], label='Train Loss', color='blue')
+    ax1.plot(df['intra_session_loss'], label='Intra-Session Test Loss', linestyle='--', color='green')
+    ax1.plot(df['inter_session_loss'], label='Inter-Session Test Loss', linestyle='--', color='red')
+    ax1.set_title(f'Subject {subject_id} - Model Loss')
+    ax1.set_xlabel('Epochs')
+    ax1.set_ylabel('Loss')
+    ax1.legend()
+    
+    # Plotting Accuracy
+    ax2.plot(df['train_acc'], label='Train Accuracy', color='blue')
+    ax2.plot(df['intra_session_acc'], label='Intra-Session Test Accuracy', linestyle='--', color='green')
+    ax2.plot(df['inter_session_acc'], label='Inter-Session Test Accuracy', linestyle='--', color='red')
+    ax2.set_title(f'Subject {subject_id} - Model Accuracy')
+    ax2.set_xlabel('Epochs')
+    ax2.set_ylabel('Accuracy')
+    ax2.legend()
+    
+    plt.tight_layout()
+    # Save the figure
+    plt.savefig(f"subject_{subject_id}_training_results.png")
+    plt.show()
+
+
+def SubjectChecker(model,loss_fn,i):
     matFilePaths=[]
-    for i in range(1,11):
-        matFilePaths+=fileFinder(r'..\Data\DB6_s%s_a' % i)+fileFinder(r'..\Data\DB6_s%s_b' % i)
-    for i in range(0,10):
-        dataPaths=matFilePaths
-        targetDataPath=dataPaths.pop(i)
-        trainData=loadDataset(dataPaths)
-        testData=loadDataset(targetDataPath)
-        trainLoader=DataLoader(trainData, batch_size=batchSize, shuffle=True)
-        testLoader=DataLoader(testData,batch_size=batchSize,shuffle=False)
-        #Load and run the network
-        model=Net_SLSTM_TempAtten().to(device)
-        optimiser = torch.optim.Adam(model.parameters(), lr=1e-3)
-        losses,accuracies=trainNetwork(model,trainLoader,numEpochs,loss_fn,optimiser,0)
-        testNetwork(model,testLoader,loss_fn,optimiser,0)
+    matFilePaths=fileFinder(r'..\Data\DB6_s%s_a' % i)+fileFinder(r'..\Data\DB6_s%s_b' % i)
+    dataPaths=matFilePaths[:7]
+    targetDataPath=matFilePaths[7:]
+    trainData=loadDataset(dataPaths)
+    testDataIntra=loadDataset(targetDataPath)
+    
+    testSize=int(len(trainData)*TESTTHRESHOLD)
+    trainSize=len(trainData)-testSize
+    trainData,testDataInter=random_split(trainData,[trainSize,testSize])        
+    
+    trainLoader=DataLoader(trainData, batch_size=batchSize, shuffle=True)
+    testLoaderIntra=DataLoader(testDataIntra,batch_size=batchSize,shuffle=False)
+    testLoaderInter=DataLoader(testDataInter,batch_size=batchSize,shuffle=False)
+    
+    #Load and run the network
+    optimiser = torch.optim.Adam(model.parameters(), lr=1e-3)
+    history=trainNetwork(model,trainLoader,testLoaderIntra,testLoaderInter,numEpochs,loss_fn,optimiser,0)
+    
+    results_df = pd.DataFrame(history)
+    results_df.to_csv(f"subject_{i}_training_history.csv", index_label="Epoch")
+    print(f"\nResults for subject {i} saved to subject_{i}_training_history.csv")
+    
+        
             
     
 numEpochs=10
@@ -164,26 +200,8 @@ batchSize=128
 
 device = torch.device("cuda") if torch.cuda.is_available() else torch.device("mps") if torch.backends.mps.is_available() else torch.device("cpu")
 #model=STCN_Assembled(numChannels,[32, 32, 64, 64],numGestures).to(device)
-model=Net_SLSTM_TempAtten().to(device)
+model=Net().to(device)
 
-matFilePaths=fileFinder(r'..\Data\DB6_s1_a')+fileFinder(r'..\Data\DB6_s1_b')+fileFinder(r'..\Data\DB6_s7_a')+fileFinder(r'..\Data\DB6_s7_b')
-testMatFilePaths=fileFinder(r'..\Data\DB6_s2_a')+fileFinder(r'..\Data\DB6_s2_b')[0:2]
+lossFn = nn.CrossEntropyLoss()
+SubjectChecker(model,lossFn,inp)
 
-#matFilePaths=fileFinder(r'C:\Users\Nia Touko\Downloads\DB6_s1_a')
-#testMatFilePaths=fileFinder(r'C:\Users\Nia Touko\Downloads\DB6_s1_b')
-#Isolates training and testing data, and shuffles the training (not the testing to simulate real world )
-
-trainData=loadDataset(matFilePaths)
-testData=loadDataset(testMatFilePaths)
-
-
-trainLoader=DataLoader(trainData, batch_size=batchSize, shuffle=True)
-testLoader=DataLoader(testData,batch_size=batchSize,shuffle=False)
-
-#Training Settings
-loss_fn = nn.CrossEntropyLoss()
-optimiser = torch.optim.Adam(model.parameters(), lr=1e-3)
-
-
-losses,accuracies=trainNetwork(model,trainLoader,numEpochs,loss_fn,optimiser,0)
-testNetwork(model,testLoader,loss_fn,optimiser,0)
