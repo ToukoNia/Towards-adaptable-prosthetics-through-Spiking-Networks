@@ -1,27 +1,25 @@
 # -*- coding: utf-8 -*-
 """
-Created on Tue Jul  8 18:15:53 2025
+Created on Thu Jul 10 12:53:00 2025
 
 @author: Nia Touko
 """
 
-#Modified standard loader but for the supercomputer, single subject testing
-
 
 import torch
 import torch.nn as nn
-from torch.utils.data import TensorDataset, DataLoader,random_split
+from torch.utils.data import TensorDataset, DataLoader,Subset
 from snntorch import spikegen
 from scipy import io
 import numpy as np
 import glob
 import os
-from models import Net_SLSTM_TAB as Net
+from S_LSTM_Model import Net_SLSTM as Net
 import sys
 import pandas as pd
 import matplotlib.pyplot as plt
 from sklearn.model_selection import train_test_split
-
+import re
 # Data parameters
 numSubjects = 1  
 numGestures = 8
@@ -31,12 +29,13 @@ windowSize=400
 TESTTHRESHOLD=0.3
 inp = int(float(sys.argv[1]))
 
-def loadDataset(mat_paths, windowSize=windowSize, overlapR=0.5, numClasses=numGestures,doEncode=0):
-    x,y=[],[]
+def loadDataset(mat_paths, windowSize=windowSize, overlapR=0.5, numClasses=numGestures): #def better ways to implement this for multi files but i was going quickly, also might be worth changing the labels to be like bianry strings or smthing later to reduce overfitting?
+    x,y,subject=[],[],[]
     stride=int((1-overlapR)*windowSize)
     targetLabels = [0, 1, 3, 4, 6, 9, 10, 11]
     labelMap = {label: i for i, label in enumerate(targetLabels)}
-    for mat_path in mat_paths:
+    domainLabel=0
+    for mat_path in mat_paths:  #for the single subject case each file is a new session, so the domain label will be just incremented
         mat = io.loadmat(mat_path)
         emg = mat['emg']             
         labels = mat['restimulus']   
@@ -52,79 +51,30 @@ def loadDataset(mat_paths, windowSize=windowSize, overlapR=0.5, numClasses=numGe
             if label in labelMap: #remaps the labels so that they are within range (is this even neccessary)
                 remappedLabel = labelMap[label]
                 y.append(remappedLabel) # Append the new, remapped label (e.g., 2 instead of 3)
-                if doEncode:
-                    encodedSegment=spikegen.delta(segment,threshold=1e-5)
-                    x.append(encodedSegment)
-                else:
-                    x.append(segment)
-    
+                subject.append(domainLabel)
+                x.append(segment)
+        domainLabel+=1
     x = torch.stack(x)    # [num_samples, window_size, num_channels]
     y = torch.tensor(y)   # [num_samples]
+    subjects=torch.tensor(subject)
+    #probably should add a fallout for if std is 0 or add an epsilon but ah well     
+    return TensorDataset(x, y, subjects)
 
-    
-    return TensorDataset(x, y)
 
-def loadAndSplitPerSession(matPaths, testSize=TESTTHRESHOLD, doEncode=0):
-
-    allTrainX, allTrainY = [], []
-    allTestX, allTestY = [], []
-
-    overlapR = 0.5
-    stride = int((1 - overlapR) * windowSize)
-    targetLabels = [0, 1, 3, 4, 6, 9, 10, 11]
-    labelMap = {label: i for i, label in enumerate(targetLabels)}
-    for matPath in matPaths:
-        mat = io.loadmat(matPath)
-        emg = mat['emg']
-        labels = mat['restimulus']
-        emg = np.delete(emg, [8, 9], axis=1)
-        emg = torch.tensor(emg, dtype=torch.float32)
-        labels = torch.tensor(labels, dtype=torch.long).squeeze()
-        sessionX, sessionY = [], []
-        for i in range(0, emg.shape[0] - windowSize, stride):
-            segment = emg[i:i+windowSize]
-            labelWindow = labels[i:i+windowSize]
-            label = int(torch.mode(labelWindow)[0])
-
-            if label in labelMap:
-                remappedLabel = labelMap[label]
-                sessionY.append(remappedLabel)
-                if doEncode:
-                    encodedSegment = spikegen.delta(segment, threshold=1e-5)
-                    sessionX.append(encodedSegment)
-                else:
-                    sessionX.append(segment)
-        if not sessionX:
-            continue
-        sessionX_tensor = torch.stack(sessionX)
-        sessionY_tensor = torch.tensor(sessionY)
-        trainX, testX, trainY, testY = train_test_split(
-            sessionX_tensor,
-            sessionY_tensor,
-            test_size=testSize,
-            stratify=sessionY_tensor, 
-            random_state=42
-        )
-        allTrainX.append(trainX)
-        allTestX.append(testX)
-        allTrainY.append(trainY)
-        allTestY.append(testY)
-    finalTrainX = torch.cat(allTrainX, dim=0)
-    finalTestX = torch.cat(allTestX, dim=0)
-    finalTrainY = torch.cat(allTrainY, dim=0)
-    finalTestY = torch.cat(allTestY, dim=0)
-
-    trainDataset = TensorDataset(finalTrainX, finalTrainY)
-    testDataset = TensorDataset(finalTestX, finalTestY)
-
-    return trainDataset, testDataset
-
-def normaliseData(dataset):
-    x,y=dataset.tensors
-    mean=x.mean(dim=0,keepdim=True)
-    std=x.std(dim=0,keepdim=True)
-    xNorm=(x-mean)/std
-    return TensorDataset(xNorm,y) #probably should add a fallout for if std is 0 or add an epsilon but ah well     
+class DataNormaliser():
+    def __init__(self):
+        self.mean=0
+        self.std=0
+    def forwardTrain(self,dataset):
+        x,y=dataset.tensors
+        self.mean=x.mean(dim=0,keepdim=True)
+        self.std=x.std(dim=0,keepdim=True)
+        xNorm=(x-self.mean)/self.std
+        return TensorDataset(xNorm,y) #probably should add a fallout for if std is 0 or add an epsilon but ah well     
+    def forward(self,dataset):
+        x,y=dataset.tensors
+        xNorm=(x-self.mean)/self.std
+        return TensorDataset(xNorm,y)
 
 def fileFinder(dataDirectory):
     searchPattern = os.path.join(dataDirectory, '*.mat')
@@ -135,7 +85,7 @@ def fileFinder(dataDirectory):
         
     return matFilePaths
 
-def trainNetwork(model,trainLoader,testLoader1,testLoader2,numEpochs,loss_fn,optimiser,doReset):
+def trainNetwork(model,trainLoader,testLoader1,testLoader2,numEpochs,lossGestureFn,lossDomainFn,optimiser,doReset):
     #Training Settings
     history = {
        'train_loss': [], 'train_acc': [],
@@ -147,30 +97,36 @@ def trainNetwork(model,trainLoader,testLoader1,testLoader2,numEpochs,loss_fn,opt
         model.train()
         totalLoss = 0
         correctPredictions=0
-        for x, y in trainLoader:    #loops through trainloader
+        i=0
+        for x, y, subjects in trainLoader:    #loops through trainloader
             #Data is moved to the right place
             x = x.permute(1,0,2)
-            x, y = x.to(device), y.to(device)
-            if doReset:
-                model.reset()   #resets the membrane potential of the LIF neurons (is only needed for the S-TCN architecute)
-            output = model(x)
-            #calculates the training values
-            loss = loss_fn(output, y)
+            x, y, subjects = x.to(device), y.to(device),subjects.to(device)
+            p = float(i + epoch * len(trainLoader)) / (numEpochs * len(trainLoader))
+            i+=1
+            alpha = 2. / (1. + np.exp(-10 * p)) - 1
+            # Inside your training loop
+            gestureOutput, domainOutput = model(x, alpha)
+            
+            lossGesture = lossGestureFn(gestureOutput, y)
+            lossDomain = lossDomainFn(domainOutput, subjects)
+            
+            # Combine the losses
             optimiser.zero_grad()
+            loss = lossGesture + lossDomain 
             loss.backward()
             optimiser.step()
-            
             #updates the readOuts
-            totalLoss += loss.item()
-            _, predictions = torch.max(output, 1)
+            totalLoss += lossGesture.item()
+            _, predictions = torch.max(gestureOutput, 1)
             correctPredictions += (predictions == y).sum().item()
         currentAccuracy = (correctPredictions / len(trainLoader.dataset))*100
         history['train_loss'].append(totalLoss / len(trainLoader))
         history['train_acc'].append(currentAccuracy)
 
         
-        testAccuracyIntra,testLossIntra=testNetwork(model,testLoader1,loss_fn,0)
-        testAccuracyInter,testLossInter=testNetwork(model,testLoader2,loss_fn,0)
+        testAccuracyIntra,testLossIntra=testNetwork(model,testLoader1,lossGestureFn,0)
+        testAccuracyInter,testLossInter=testNetwork(model,testLoader2,lossGestureFn,0)
         
         history['intra_session_acc'].append(testAccuracyIntra)
         history['intra_session_loss'].append(testLossIntra)
@@ -183,11 +139,9 @@ def testNetwork(model, testLoader,loss_fn,doReset):
     with torch.no_grad():
         correctPredictions=0
         testLoss=0
-        for x,y in testLoader:
+        for x,y,_ in testLoader:
             x=x.permute(1,0,2)
             x,y=x.to(device),y.to(device)
-            if doReset:
-                model.reset()   #resets the membrane potential of the LIF neurons (is only needed for the S-TCN architecute)
             output=model(x)
             loss = loss_fn(output, y)
             _, predictions = torch.max(output, 1)
@@ -244,22 +198,26 @@ def createStratifiedSplit(fullDataset, testSize):
     testX = x[testIndices]
     testY = y[testIndices]
 
+    # Create new TensorDataset objects from the sliced tensors
     trainSet = TensorDataset(trainX, trainY)
     testSet = TensorDataset(testX, testY)
 
     return trainSet, testSet
 
 def SubjectChecker(model,loss_fn,i,encode=0):
-
-    matFilePaths=fileFinder(r'/home/coa23nt/EMG-SNN/Data/DB6_s%s_a'%i)+fileFinder(r'/home/coa23nt/EMG-SNN/Data/DB6_s%s_b'%i)
+    normaliseData=DataNormaliser()
+    matFilePaths=fileFinder(r'..\Data\DB6_s%s_a'%i)+fileFinder(r'..\Data\DB6_s%s_b'%i)
     dataPaths=matFilePaths[:7]
     targetDataPath=matFilePaths[7:]
+    trainData=loadDataset(dataPaths,doEncode=encode)
     testDataIntra=loadDataset(targetDataPath,doEncode=encode)
-    trainData,testDataInter= loadAndSplitPerSession(dataPaths) 
+    trainData,testDataInter= createStratifiedSplit(trainData, TESTTHRESHOLD) 
     
     
     if not encode:
-        trainData=normaliseData(trainData)
+        trainData=normaliseData.forwardTrain(trainData)
+        testDataIntra=normaliseData.forward(testDataIntra)
+        testDataInter=normaliseData.forward(testDataInter)
      
     
     trainLoader=DataLoader(trainData, batch_size=batchSize, shuffle=True)
@@ -278,7 +236,7 @@ def SubjectChecker(model,loss_fn,i,encode=0):
     torch.save({'model_state_dict': model.state_dict(),'optimiser_state_dict':optimiser.state_dict()},r"Subject_%s_SLSTM_TAB" % i)    
             
     
-numEpochs=15
+numEpochs=4
 batchSize=128
 
     
@@ -287,5 +245,4 @@ device = torch.device("cuda") if torch.cuda.is_available() else torch.device("mp
 model=Net().to(device)
 
 lossFn = nn.CrossEntropyLoss()
-SubjectChecker(model,lossFn,inp,encode=1)
-
+SubjectChecker(model,lossFn,inp,encode=0)

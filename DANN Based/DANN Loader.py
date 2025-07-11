@@ -200,4 +200,4 @@ def LOSO(): #Leave one subject out: iterates through all the subjects, leaving o
 lossGestureFn = nn.CrossEntropyLoss()
 lossDomainFn = nn.CrossEntropyLoss()
     
-LOSO()
+results=LOSO()

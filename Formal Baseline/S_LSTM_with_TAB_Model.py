@@ -19,52 +19,6 @@ class Net_SLSTM(nn.Module):
         self.slstm2 = snn.SLSTM(hiddenSize, hiddenSize, spike_grad=surrogate.fast_sigmoid(),learn_threshold=True,reset_mechanism="subtract")
         
         # Instantiate the adapted TAB layers for input and hidden spikes
-        '''
-        self.tab_input = TAB_Layer(num_features=inputSize, time_steps=windowSize)
-        self.tab_hidden = TAB_Layer(num_features=hiddenSize, time_steps=windowSize)
-        '''
-        self.bn1=nn.BatchNorm1d(hiddenSize)
-        self.bnh=nn.BatchNorm1d(hiddenSize)
-        #self.bn2 = nn.BatchNorm1d(hiddenSize)
-        self.fc = nn.Linear(hiddenSize, numClasses)   #output
-    def forward(self, x):  # x: [time, batch, features]
-        syn1, mem1 = self.slstm1.init_slstm()
-        syn2, mem2 = self.slstm2.init_slstm()
-        mem2Rec = []
-        spk1Rec=[]
-        #spk2Rec=[]
-        #inputNorm=self.roughTemporalAccumulatedBN(spk1Rec,self.bn1)
-        for step in range(x.size(0)):
-            spk1, syn1, mem1 = self.slstm1(x[step], syn1, mem1)
-            spk1Rec.append(spk1)
-        #TAB 
-        spk1NormRec=self.roughTemporalAccumulatedBN(spk1Rec,self.bnh)
-        for step in range(x.size(0)):
-            spk2, syn2, mem2 = self.slstm2(spk1NormRec[step], syn2, mem2)
-            mem2Rec.append(mem2)
-        mem2Rec = torch.stack(mem2Rec)
-        finalMem = mem2Rec.mean(dim=0)
-        out = self.fc(finalMem)
-        return out
-    def roughTemporalAccumulatedBN(self,spkRec,bn):
-        spkRec=torch.stack(spkRec)
-        tSteps,bSize,nFeatures=spkRec.shape
-        spkFlat=spkRec.view(tSteps*bSize,nFeatures)
-        spkNormFlat=bn(spkFlat)
-        spkNormRec=spkNormFlat.view(tSteps,bSize,nFeatures)
-        return spkNormRec
-
-
-'''temp
-class Net_SLSTM(nn.Module):
-    def __init__(self, inputSize=numChannels, hiddenSize=128, numClasses=8,windowSize=400): 
-        super().__init__()
-        self.hiddenSize = hiddenSize
-        self.numClasses = numClasses
-        self.slstm1 = snn.SLSTM(inputSize, hiddenSize, spike_grad=surrogate.fast_sigmoid(),learn_threshold=True,reset_mechanism="subtract")
-        self.slstm2 = snn.SLSTM(hiddenSize, hiddenSize, spike_grad=surrogate.fast_sigmoid(),learn_threshold=True,reset_mechanism="subtract")
-        
-        # Instantiate the adapted TAB layers for input and hidden spikes
         self.tab_input = TAB_Layer(num_features=inputSize, time_steps=windowSize)
         self.tab_hidden = TAB_Layer(num_features=hiddenSize, time_steps=windowSize)
         
@@ -129,4 +83,3 @@ class TAB_Layer(nn.Module): ## Taken from https://github.com/HaiyanJiang/SNN-TAB
         y = y_res * p_checked.permute(1, 0, 2)
         
         return y
-'''

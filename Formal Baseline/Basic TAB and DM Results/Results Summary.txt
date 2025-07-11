@@ -1,0 +1,5 @@
+Model was trained on 49% of 1 subjects total data and then tested on unseen session data (30% of the sessions) in a stratified split. It was then also tested on 3 sessions that where left out originally completely from the dataset.
+
+Model preformed a lot poorer than in testing with higher amounts of data
+
+This was done before making the stratified split across sessions instead of global (hence potential poorer generalisation

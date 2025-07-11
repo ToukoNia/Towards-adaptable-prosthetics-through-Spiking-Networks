@@ -1,17 +1,12 @@
 import torch
-from torch.nn.utils.parametrizations import weight_norm 
 import torch.nn as nn
-import snntorch as snn
-from snntorch import surrogate
 from torch.utils.data import TensorDataset, DataLoader      #,random_split
-from torch.optim.lr_scheduler import ReduceLROnPlateau
 import scipy
 import numpy as np
 from tqdm import tqdm
 import glob
 import os
-from S_TCN_Model import STCN_Assembled#
-from S_LSTM_Model import AdaptiveNet_SLSTM
+from S_LSTM_Model import S_CLSTM
 
 # Data parameters
 numSubjects = 1  
@@ -47,21 +42,19 @@ def loadDataset(mat_paths, windowSize=windowSize, stride=200, numClasses=numGest
     y = torch.tensor(y)   # [num_samples]
  
     #probably should add a fallout for if std is 0 or add an epsilon but ah well     
-    mean = x.mean(dim=(0, 1), keepdim=True)
-    std = x.std(dim=(0, 1), keepdim=True)
-    x=(x-mean)/(std)
+    #mean = x.mean(dim=(0, 1), keepdim=True)
+    #std = x.std(dim=(0, 1), keepdim=True)
+    #x=(x-mean)/(std)
     
     return TensorDataset(x, y)
 
-def roughTemporalAccumulatedBN(spkRec,bn):
-    spkRec=torch.stack(spkRec)
-    tSteps,bSize,nFeatures=spkRec.shape
-    spkFlat=spkRec.view(tSteps*bSize,nFeatures)
-    spkNormFlat=bn(spkFlat)
-    spkNormRec=spkNormFlat.view(tSteps,bSize,nFeatures)
-    return spkNormRec
 
-
+def normaliseData(dataset):
+    x,y=dataset.tensors
+    mean=x.mean(dim=0,keepdim=True)
+    std=x.std(dim=0,keepdim=True)
+    xNorm=(x-mean)/std
+    return TensorDataset(xNorm,y)
 
     
 def fileFinder(dataDirectory):
@@ -152,7 +145,7 @@ numEpochs=5
 
 device = torch.device("cuda") if torch.cuda.is_available() else torch.device("mps") if torch.backends.mps.is_available() else torch.device("cpu")
 #model=STCN_Assembled(numChannels,[32, 32, 64, 64],numGestures).to(device)
-model=AdaptiveNet_SLSTM().to(device)
+model=S_CLSTM().to(device)
 
 
 matFilePaths=fileFinder(r'C:\Users\Nia Touko\Downloads\DB6_s1_a')
@@ -166,6 +159,7 @@ matFilePaths.append(testMatFilePaths.pop(0))
 #Isolates training and testing data, and shuffles the training (not the testing to simulate real world )
 
 trainData=loadDataset(matFilePaths)
+trainData=normaliseData(trainData)
 testData=loadDataset(testMatFilePaths)
 '''
 data=loadDataset(mat_file_paths)

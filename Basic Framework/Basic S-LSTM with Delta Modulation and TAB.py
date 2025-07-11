@@ -14,7 +14,7 @@ import numpy as np
 from tqdm import tqdm
 import glob
 import os
-from S_LSTM_Model import Net_SLSTM_TempAtten
+from S_LSTM_with_TAB_Model import Net_SLSTM
 # Data parameters
 numSubjects = 1  
 numGestures = 8
@@ -94,7 +94,7 @@ def trainNetwork(model,trainLoader,numEpochs,loss_fn,optimiser,doReset):
             correctPredictions += (predictions == y).sum().item()
             currentAccuracy = (correctPredictions / loop.n)
             loop.set_postfix(loss=loss.item(), acc=f"{currentAccuracy:.2f}%")
-        accuracies.append(currentAccuracy)
+        accuracies.append(correctPredictions/len(trainLoader.dataset))
         losses.append(totalLoss / len(trainLoader))
         print(f"Epoch {epoch+1}: Loss = {losses[-1]:.4f}")
     return losses, accuracies
@@ -151,7 +151,7 @@ def LOSO(model,loss_fn):
         trainLoader=DataLoader(trainData, batch_size=batchSize, shuffle=True)
         testLoader=DataLoader(testData,batch_size=batchSize,shuffle=False)
         #Load and run the network
-        model=Net_SLSTM_TempAtten().to(device)
+        model=Net_SLSTM().to(device)
         optimiser = torch.optim.Adam(model.parameters(), lr=1e-3)
         losses,accuracies=trainNetwork(model,trainLoader,numEpochs,loss_fn,optimiser,0)
         testNetwork(model,testLoader,loss_fn,optimiser,0)
@@ -164,17 +164,18 @@ batchSize=128
 
 device = torch.device("cuda") if torch.cuda.is_available() else torch.device("mps") if torch.backends.mps.is_available() else torch.device("cpu")
 #model=STCN_Assembled(numChannels,[32, 32, 64, 64],numGestures).to(device)
-model=Net_SLSTM_TempAtten().to(device)
+model=Net_SLSTM().to(device)
 
-matFilePaths=fileFinder(r'..\Data\DB6_s1_a')+fileFinder(r'..\Data\DB6_s1_b')+fileFinder(r'..\Data\DB6_s7_a')+fileFinder(r'..\Data\DB6_s7_b')
-testMatFilePaths=fileFinder(r'..\Data\DB6_s2_a')+fileFinder(r'..\Data\DB6_s2_b')[0:2]
+#matFilePaths=fileFinder(r'..\Data\DB6_s1_a')+fileFinder(r'..\Data\DB6_s1_b')+fileFinder(r'..\Data\DB6_s7_a')+fileFinder(r'..\Data\DB6_s7_b')
+#testMatFilePaths=fileFinder(r'..\Data\DB6_s2_a')+fileFinder(r'..\Data\DB6_s2_b')[0:2]
 
-#matFilePaths=fileFinder(r'C:\Users\Nia Touko\Downloads\DB6_s1_a')
-#testMatFilePaths=fileFinder(r'C:\Users\Nia Touko\Downloads\DB6_s1_b')
+matFilePaths=fileFinder(r'C:\Users\Nia Touko\Downloads\DB6_s1_a')
+testMatFilePaths=fileFinder(r'C:\Users\Nia Touko\Downloads\DB6_s1_b')
 #Isolates training and testing data, and shuffles the training (not the testing to simulate real world )
+matFilePaths.append(testMatFilePaths.pop(0))
 
-trainData=loadDataset(matFilePaths)
-testData=loadDataset(testMatFilePaths)
+trainData=loadDataset(matFilePaths,doEncode=1)
+testData=loadDataset(testMatFilePaths,doEncode=1)
 
 
 trainLoader=DataLoader(trainData, batch_size=batchSize, shuffle=True)

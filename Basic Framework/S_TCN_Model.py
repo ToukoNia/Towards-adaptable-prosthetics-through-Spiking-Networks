@@ -40,7 +40,7 @@ class STCN_Extractor_Building_Block(nn.Module):
         return outRes, mem1, mem2, memRes
 
 class STCN_Assembled(nn.Module): #channels are called stages to reduce confusion with electrode channels, and because I was listening to a song about putting on a preformance whilst coding
-    def __init__(self,nInputs,nStages,nGestures,kernelSize=1.5):
+    def __init__(self,nInputs,nStages,nGestures,kernelSize=3):
         super().__init__()
         layers=[]
         for i in range(len(nStages)):
@@ -52,6 +52,7 @@ class STCN_Assembled(nn.Module): #channels are called stages to reduce confusion
         self.fc=nn.Linear(nStages[-1],nGestures)
     def forward(self, x):
         memFwd = [None] * len(self.net) * 3  # 3 LIF neurons per block
+        self.reset()
         out = []
         
         # Temporal loop
