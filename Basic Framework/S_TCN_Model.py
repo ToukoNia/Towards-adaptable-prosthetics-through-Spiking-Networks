@@ -10,7 +10,17 @@ import torch.nn as nn
 import snntorch as snn
 from snntorch import surrogate
 
+# -*- coding: utf-8 -*-
+"""
+Created on Mon Jun 30 14:21:36 2025
 
+@author: Nia Touko
+"""
+import torch
+from torch.nn.utils.parametrizations import weight_norm 
+import torch.nn as nn
+import snntorch as snn
+from snntorch import surrogate     
    
 class STCN_Extractor_Building_Block(nn.Module):
    def __init__(self,nInputs,nOutputs,kernelSize,stride,dilation):
@@ -51,8 +61,14 @@ class STCN_Assembled(nn.Module): #channels are called stages to reduce confusion
         self.net = nn.ModuleList(layers)
         self.fc=nn.Linear(nStages[-1],nGestures)
     def forward(self, x):
-        memFwd = [None] * len(self.net) * 3  # 3 LIF neurons per block
-        self.reset()
+        memFwd = []
+        for layer in self.net:
+            mem_block = (
+                layer.lif1.init_leaky(),
+                layer.lif2.init_leaky(),
+                layer.lif_res.init_leaky()
+            )
+            memFwd.extend(mem_block)
         out = []
         
         # Temporal loop
@@ -62,7 +78,8 @@ class STCN_Assembled(nn.Module): #channels are called stages to reduce confusion
             for i, layer in enumerate(self.net):
                 if (i==0):
                     xt=xt.unsqueeze(2)
-                xt, mem1out, mem2out, memResOut = layer(xt, memFwd[mem_idx], memFwd[mem_idx+1], memFwd[mem_idx+2])
+                mem1, mem2, memRes = memFwd[mem_idx], memFwd[mem_idx+1], memFwd[mem_idx+2]
+                xt, mem1out, mem2out, memResOut = layer(xt, mem1, mem2, memRes)
                 memFwd[mem_idx], memFwd[mem_idx+1], memFwd[mem_idx+2] = mem1out, mem2out, memResOut
                 mem_idx += 3
             out.append(xt)
