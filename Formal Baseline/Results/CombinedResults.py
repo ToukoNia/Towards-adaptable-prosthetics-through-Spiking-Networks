@@ -30,13 +30,14 @@ def plot_results(history,model):
     ax2.plot(df['intra_session_acc'], label='Intra-Session Test Accuracy', linestyle='--', color='green')
     ax2.plot(df['inter_session_acc'], label='Inter-Session Test Accuracy', linestyle='--', color='red')
     ax2.set_title(f'Mean of sessions- {model} Accuracy')
+    ax2.set_ylim(30, 75)
     ax2.set_xlabel('Epochs')
     ax2.set_ylabel('Accuracy')
     ax2.legend()
     
     plt.tight_layout()
     # Save the figure
-    plt.savefig(f"Overall_training_results_{model}.png")
+    plt.savefig(f"Combined Graphs\Overall_training_results_{model}.png")
     plt.show()
     
 def fileFinder(dataDirectory):
@@ -53,17 +54,18 @@ def fileFinder(dataDirectory):
 dirs = [f for f in os.listdir() if os.path.isdir(f)]
 print(dirs)
 for direct in dirs:
-    directory = direct+r'\CSV'
-    print(directory)
-    paths=fileFinder(directory)
-    history = []
-    for path in paths:
-        df = pd.read_csv(path)
-        history.append(df)
+    if direct != "Combined Graphs":
+        directory = direct+r'\CSV'
+        print(directory)
+        paths=fileFinder(directory)
+        history = []
+        for path in paths:
+            df = pd.read_csv(path)
+            history.append(df)
     
-    dfCat=pd.concat(history)
-    idx=dfCat.groupby(dfCat.Epoch)
-    df=idx.mean()
-    print(df) 
-    plot_results(df,direct)
+        dfCat=pd.concat(history)
+        idx=dfCat.groupby(dfCat.Epoch)
+        df=idx.mean()
+        print(df) 
+        plot_results(df,direct)
       
