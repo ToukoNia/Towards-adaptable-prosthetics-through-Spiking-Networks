@@ -60,9 +60,40 @@ class S_CLSTM_DANN(nn.Module):
         features = torch.mean(mem2_rec, dim=0)
         gestureOutput = self.fc_gesture(features)
         
-        # 2. Domain prediction with Gradient Reversal
         reversedFeatures = GradientReversal.apply(features, alpha)
         domainHidden, _ = self.lif_domain(self.fc_domain_1(reversedFeatures))
         domainOutput = self.fc_domain_2(domainHidden)
         
         return gestureOutput, domainOutput
+    
+class Net_SLSTM(nn.Module):
+    def __init__(self, inputSize=14, hiddenSize=128, numClasses=8,numSubjects=7):
+        super().__init__()
+        self.hiddenSize = hiddenSize
+        self.numClasses = numClasses
+        self.slstm1 = snn.SLSTM(inputSize, hiddenSize, spike_grad=surrogate.fast_sigmoid(),learn_threshold=True,reset_mechanism="subtract")
+        self.slstm2 = snn.SLSTM(hiddenSize, hiddenSize, spike_grad=surrogate.fast_sigmoid(),learn_threshold=True,reset_mechanism="subtract")
+        self.bn1 = nn.BatchNorm1d(hiddenSize)
+        self.inputBn=nn.BatchNorm1d(inputSize)
+        self.fc = nn.Linear(hiddenSize, numClasses)   #output
+        self.fc_domain_1 = nn.Linear(hiddenSize, 64)
+        self.lif_domain = snn.Leaky(beta=0.9, learn_threshold=True)
+        self.fc_domain_2 = nn.Linear(64, numSubjects)
+    def forward(self, x,alpha=1.0):  # x: [time, batch, features]
+        syn1, mem1 = self.slstm1.init_slstm()
+        syn2, mem2 = self.slstm2.init_slstm()
+        mem2Rec = []
+        for step in range(x.size(0)):
+            spk1, syn1, mem1 = self.slstm1(x[step], syn1, mem1)
+            spk1 = self.bn1(spk1) 
+            spk2, syn2, mem2 = self.slstm2(spk1, syn2, mem2)
+  
+            mem2Rec.append(mem2)
+        mem2Rec = torch.stack(mem2Rec)
+        features = mem2Rec.mean(dim=0)
+        gesturesOut = self.fc(features)
+        reversedFeatures = GradientReversal.apply(features, alpha)
+        domainHidden, _ = self.lif_domain(self.fc_domain_1(reversedFeatures))
+        domainOutput = self.fc_domain_2(domainHidden)
+        
+        return gesturesOut, domainOutput
