@@ -88,11 +88,18 @@ class GMM:
 
         if self.gmm_dist is None:
             raise RuntimeError("GMM must be fitted before sampling.")
-        
         component_indices = self.gmm_dist.mixture_distribution.sample((num_samples,))
-        samples = [self.gmm_dist.component_distribution[i].sample() for i in component_indices]
+        all_means = self.gmm_dist.component_distribution.loc
+        all_covs = self.gmm_dist.component_distribution.covariance_matrix
+        selected_means = all_means[component_indices]
+        selected_covs = all_covs[component_indices]
+        temp_dist = torch.distributions.MultivariateNormal(
+        loc=selected_means, 
+        covariance_matrix=selected_covs
+        )
+        samples = temp_dist.sample()
         
-        return torch.stack(samples), component_indices
+        return samples, component_indices
 
 def sliced_wasserstein_distance(source_samples, target_samples, n_projections=500):
     source_np = source_samples.detach().cpu().numpy()

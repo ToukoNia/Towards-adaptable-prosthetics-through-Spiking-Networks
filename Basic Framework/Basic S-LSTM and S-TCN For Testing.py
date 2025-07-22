@@ -21,6 +21,7 @@ def loadDataset(mat_paths, windowSize=windowSize, stride=200, numClasses=numGest
     labelMap = {label: i for i, label in enumerate(targetLabels)}
     for mat_path in tqdm(mat_paths, desc="Files"):
         mat = scipy.io.loadmat(mat_path)
+        print(len(mat['restimulus']))
         emg = mat['emg']             
         labels = mat['restimulus']   
         emg = np.delete(emg, [8, 9], axis=1)    #don't contain information

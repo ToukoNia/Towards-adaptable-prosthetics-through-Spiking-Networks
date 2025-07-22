@@ -153,12 +153,10 @@ def consolidated_loss(encTarg, gmm, classifier, lambdaSwd, batchSize):
     
     #Distribution Allignment
     lossSwd = sliced_wasserstein_distance(encTarg, pseudoSamples)
-    
     total = lossClass + lambdaSwd * lossSwd
-    
     return total, lossClass, lossSwd
 
-def trainNetwork(model,trainLoader,testLoader1,testLoader2,numEpochs,loss_fn,optimiser,doReset):
+def trainNetwork(model,trainLoader,testLoader1,testLoader2,numEpochs,loss_fn,optimiser):
     #Training Settings
     history = {
        'train_loss': [], 'train_acc': [],
@@ -174,8 +172,6 @@ def trainNetwork(model,trainLoader,testLoader1,testLoader2,numEpochs,loss_fn,opt
             #Data is moved to the right place
             x = x.permute(1,0,2)
             x, y = x.to(device), y.to(device)
-            if doReset:
-                model.reset()   #resets the membrane potential of the LIF neurons (is only needed for the S-TCN architecute)
             output = model(x)
             #calculates the training values
             loss = loss_fn(output, y)
@@ -187,10 +183,49 @@ def trainNetwork(model,trainLoader,testLoader1,testLoader2,numEpochs,loss_fn,opt
             totalLoss += loss.item()
             _, predictions = torch.max(output, 1)
             correctPredictions += (predictions == y).sum().item()
-        currentAccuracy = (correctPredictions / len(trainLoader.dataset))*100
-        history['train_loss'].append(totalLoss / len(trainLoader))
-        history['train_acc'].append(currentAccuracy)
+            
+        
+        
+        params = list(encoder.parameters()) + list(classifier.parameters())
+        optimizer = torch.optim.Adam(params, lr=1e-3)
+        loss_fn = nn.CrossEntropyLoss()
 
+        for epoch in range(numEpochs):
+            encoder.train()
+            classifier.train()
+            for x, y in source_train_loader:
+                x, y = x.permute(1, 0, 2).to(device), y.to(device)
+                
+                optimizer.zero_grad()
+                latent_z = encoder(x)
+                output = classifier(latent_z)
+                loss = loss_fn(output, y)
+                loss.backward()
+                optimizer.step()
+                #Need to make save the loss function etc results
+            currentAccuracy = (correctPredictions / len(trainLoader.dataset))*100
+            history['train_loss'].append(totalLoss / len(trainLoader))
+            history['train_acc'].append(currentAccuracy)
+
+            acc = test_model(encoder, classifier, source_test_loader, device)
+            print(f"Epoch {epoch+1}/{numEpochs}, Source Loss: {loss.item():.4f}, Source Test Acc: {acc:.2f}%")
+    
+        # === GMM FITTING ===
+        encoder.eval()
+        all_latent_vectors, all_labels =[],[]
+        with torch.no_grad():
+            for x, y in source_train_loader:
+                x = x.permute(1, 0, 2).to(device)
+                latent_z = encoder(x)
+                all_latent_vectors.append(latent_z)
+                all_labels.append(y)
+    
+    all_latent_vectors = torch.cat(all_latent_vectors, dim=0)
+    all_labels = torch.cat(all_labels, dim=0).to(device)
+    
+    gmm = GMM(n_components=8, n_features=128, device=device)
+    gmm.fit(all_latent_vectors, all_labels)
+        
         
         testAccuracyIntra,testLossIntra=testNetwork(model,testLoader1,loss_fn,0)
         testAccuracyInter,testLossInter=testNetwork(model,testLoader2,loss_fn,0)
@@ -201,7 +236,7 @@ def trainNetwork(model,trainLoader,testLoader1,testLoader2,numEpochs,loss_fn,opt
         history['inter_session_loss'].append(testLossInter)
     return history
 
-def testNetwork(extractor, classifer, testLoader,loss_fn,doReset):
+def testNetwork(extractor, classifer, testLoader,loss_fn):
     extractor.eval()
     classifer.eval()
     with torch.no_grad():
