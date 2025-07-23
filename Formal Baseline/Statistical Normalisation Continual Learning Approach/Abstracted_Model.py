@@ -97,6 +97,24 @@ def trainNetwork(encoder,classifier,trainLoader,numEpochs,loss_fn,optimiser):
     gmm.fit(latentVectors, allLabels)
     return encoder,classifier,gmm,history
 
+def testBasicNetwork(encoder,classifier,dataLoader,lossFn):#
+    correctPredictions=0
+    samples=0
+    loss=0
+    encoder.eval()
+    classifier.eval()
+    
+    for i,(x,y) in enumerate(dataLoader):
+        x, y = x.permute(1, 0, 2).to(device), y.to(device)
+        with torch.no_grad():
+            latentFeatures = encoder(x)
+            output = classifier(latentFeatures)
+            _, predictions = torch.max(output, 1)
+            correctPredictions += (predictions == y).sum().item()
+            samples+=x.size(1)
+            loss+=lossFn(output,y)*y.size(0)
+    current_acc = 100 * correctPredictions / samples
+    print(f"Actual Loss: {loss/samples:.4f}, Current Target Accuracy: {current_acc:.2f}%")
 def EMABasedTTACycle(encoder,classifier,gmm,dataLoader,lossFn):
     fastEncoder=encoder
     fastClassifier=classifier
@@ -141,13 +159,13 @@ def EMABasedTTACycle(encoder,classifier,gmm,dataLoader,lossFn):
         sAdaptionLoss,_,_ = consolidated_loss_entropy(
             latentFeatures, gmm, slowClassifier, lambda_swd, x.size(1)
         )
-        testLoss+=lossFn(output,y)
+        testLoss+=lossFn(output,y)*y.size(0)
         if (i + 1) % 20 == 0:
             current_acc = 100 * correctPredictions / samples
             print(f"Batch {i+1}/{len(dataLoader)}, "
                   f"Fast Adaptation Loss: {adaptionLoss.item():.4f}, "
                   f"Slow Adaptation Loss: {sAdaptionLoss.item():.4f}, "
-                  f"Actual Loss: {testLoss.item()/i:.4f}, "
+                  f"Actual Loss: {testLoss.item()/samples:.4f}, "
                   f"Current Target Accuracy: {current_acc:.2f}%")
             
     testAccuracy=100*correctPredictions/len(dataLoader.dataset)
@@ -221,10 +239,10 @@ print("\n--- Phase 1: Training on Source Data ---")
 lossFn = nn.CrossEntropyLoss()
 params = list(encoder.parameters()) + list(classifier.parameters())
 optimizer = torch.optim.Adam(params, lr=1e-3)
-
 encoder,classifier,gmm,history = trainNetwork(encoder,classifier,sourceLoader,numEpochs,lossFn,optimizer)
 
 print(f"Source training complete. Final training accuracy: {history['train_acc'][-1]:.2f}%")
+testBasicNetwork(encoder,classifier,targetLoader,lossFn)
 
 print("\n--- Phase 2: Test-Time Adaptation on Target Data ---")
 finalAcc = EMABasedTTACycle(

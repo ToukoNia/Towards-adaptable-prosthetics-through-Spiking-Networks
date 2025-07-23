@@ -58,20 +58,27 @@ class GMM:
         self.gmm_dist = None
 
     def fit(self, latent_vectors, labels):
+        if labels.ndim > 1:
+            _, labels = torch.max(labels, 1)
         unique_labels = torch.unique(labels)
         if self.n_components!= len(unique_labels):
             raise ValueError("Number of components must match number of labels. Please check this number :)")
 
         mus, covs, alphas =[],[],[]
-
+        
         for j in sorted(unique_labels.cpu().numpy()):
             class_vectors = latent_vectors[labels == j]
-            
+            num_samples = len(class_vectors)
+
             # Estimate mixture weight, mean, and covariance [1]
             alpha = len(class_vectors) / len(latent_vectors)
             mu = torch.mean(class_vectors, dim=0)
-            cov = torch.cov(class_vectors.T) + torch.eye(self.n_features, device=self.device) * 1e-6
-            
+            if num_samples < 2:
+                    # If not enough samples to compute covariance, use an identity matrix
+                    cov = torch.eye(self.n_features, device=self.device)
+            else:
+                # Otherwise, compute covariance normally
+                cov = torch.cov(class_vectors.T) + torch.eye(self.n_features, device=self.device) * 1e-6
             alphas.append(torch.tensor(alpha, device=self.device))
             mus.append(mu)
             covs.append(cov)
