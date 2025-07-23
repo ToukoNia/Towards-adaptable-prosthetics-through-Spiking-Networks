@@ -44,67 +44,20 @@ class Data_Manager(nn.Module):
     def Test(self):
 
         return self.X_te, self.Y_te
-'''
-class Data_Manager(nn.Module):
-    def __init__(self, N_data=200, N_features=2, Time=5):
-        super().__init__()
-        
-        # --- Create two distinct blobs of data ---
-        # Class 0 centered around a positive mean
-        mean_0 = torch.tensor([2.0] * N_features)
-        cov_0 = torch.eye(N_features)
-        class_0_data = torch.distributions.MultivariateNormal(mean_0, cov_0).sample((int(N_data/2), Time))
-        
-        # Class 1 centered around a negative mean
-        mean_1 = torch.tensor([-2.0] * N_features)
-        cov_1 = torch.eye(N_features)
-        class_1_data = torch.distributions.MultivariateNormal(mean_1, cov_1).sample((int(N_data/2), Time))
-        
-        # Combine and permute to [Time, N_data, N_features]
-        self.X_tr = torch.cat([class_0_data, class_1_data], dim=0).permute(1, 0, 2)
-
-        # Create corresponding labels
-        self.Y_tr = torch.zeros([N_data, 2])
-        self.Y_tr[0:int(N_data/2), 0] = 1
-        self.Y_tr[int(N_data/2):, 1] = 1
-
-        # Create a "shifted" test set by adding some noise and a bias
-        self.X_te = self.X_tr * (2 * torch.rand([1, N_data, N_features], device=self.X_tr.device) - 2) + (2 * torch.rand([1, N_data, N_features], device=self.X_tr.device) - 1)
-        self.Y_te = self.Y_tr
-
-    def Batch(self,batch_size):
-        rand_ind=torch.randint(0,self.X_tr.size(1),[batch_size])
-        x=self.X_tr[:,rand_ind,:]
-        y=self.Y_tr[rand_ind,:]
-        return x, y
-
-    def Test(self):
-        return self.X_te, self.Y_te
-'''    
+  
 def swd(source_samples, target_samples, n_projections=50):
-    """
-    Calculates a differentiable Sliced-Wasserstein distance.
-    Args:
-        source_samples: Tensor of shape (n_samples, n_features) from the source
-        target_samples: Tensor of shape (m_samples, n_features) from the target
-        n_projections: The number of random projections to use
-    """
+
     n_features = source_samples.size(1)
     
-    # Generate random projections
     projections = torch.randn(n_features, n_projections, device=source_samples.device)
     projections = projections / torch.norm(projections, dim=0, keepdim=True) # Normalize
 
-    # Project the samples
     source_proj = torch.matmul(source_samples, projections)
     target_proj = torch.matmul(target_samples, projections)
 
-    # Sort the projected samples along the sample dimension
     source_proj_sorted, _ = torch.sort(source_proj, dim=0)
     target_proj_sorted, _ = torch.sort(target_proj, dim=0)
 
-    # Calculate the L1 distance between the sorted projections
-    # This is equivalent to the 1-Wasserstein Distance on the projected samples
     distance = torch.abs(source_proj_sorted - target_proj_sorted).mean()
     
     return distance
@@ -145,6 +98,7 @@ N_eval=10
 Stat_tr=torch.zeros([N_batch,2])
 Stat_te=torch.zeros([int(N_batch/N_eval),2])
 Stat_ad=torch.zeros([int(N_batch/N_eval),2])
+Stat_tr_av=torch.zeros([int(N_batch/N_eval),2])
 feature_accumulator = []
 label_accumulator = []
 
@@ -181,7 +135,6 @@ for n in range(N_batch):
         classifier_params_before=copy.deepcopy(list(readout.parameters()))
         optimiser=torch.optim.Adam(params=list(snn_LSTM.parameters())+list(readout.parameters()),lr=1e-3)
         
-        # Fit the GMM on all the accumulated data
         gmm = GMM(n_components=2, n_features=50, device=device)
         gmm.fit(all_features, all_labels)
         feature_accumulator.clear()
@@ -244,12 +197,11 @@ for n in range(N_batch):
 
             Stat_ad[ind_help,0]=acc_ad
             Stat_ad[ind_help,1]=loss_ad
-            print(loss_swd)
             loss, loss_clf, loss_swd = consolidated_loss(
                 latentFeatures, gmm, readout, lambda_swd, y_batch.size(0)
             )
-            print(loss, loss_swd)
-            print(n, Stat_tr[n-N_eval:n,:].mean(0), Stat_te[ind_help,:],Stat_ad[ind_help,:])
+            Stat_tr_av[ind_help,:]=Stat_tr[n-N_eval:n,:].mean(0)
+            print(n, Stat_tr_av[ind_help,:], Stat_te[ind_help,:],Stat_ad[ind_help,:])
             
             ind_help+=1
 
@@ -259,8 +211,42 @@ for n in range(N_batch):
             Parameter_before = copy.deepcopy(snn_LSTM.state_dict())
             classifier_params_before = copy.deepcopy(readout.state_dict())
             
-            # To Restore:
             snn_LSTM.load_state_dict(Parameter_before)
             readout.load_state_dict(classifier_params_before)
             
             #make sure parameters are being copied correctly. Addjust GMM fitting to be over the last x samples
+            
+Stat_tr_av = Stat_tr_av.cpu()
+Stat_te = Stat_te.cpu()
+Stat_ad = Stat_ad.cpu()
+
+eval_interval = N_eval
+eval_batches = np.arange(eval_interval, N_batch, eval_interval)
+
+num_evals = ind_help
+Stat_te_recorded = Stat_te[:num_evals]
+Stat_ad_recorded = Stat_ad[:num_evals]
+Stat_tr_av_rec=Stat_tr_av[:num_evals]
+
+fig, ax = plt.subplots(2, 1, figsize=(12, 10))
+
+ax[0].set_title("Model Accuracy vs. Batch Number")
+ax[0].plot(Stat_tr_av_rec[:, 0], label="Training Accuracy", alpha=0.7)
+ax[0].plot(eval_batches, Stat_te_recorded[:, 0], label="Test Accuracy (Before TTA)", marker='o', linestyle='--',color='green')
+ax[0].plot(eval_batches, Stat_ad_recorded[:, 0], label="Test Accuracy (After TTA)", marker='x', linestyle=':',color='red')
+ax[0].set_xlabel("Batch Number")
+ax[0].set_ylabel("Accuracy (%)")
+ax[0].legend()
+ax[0].grid(True)
+
+ax[1].set_title("Model Loss vs. Batch Number")
+ax[1].plot(eval_batches, Stat_tr_av_rec[:, 1], label="Avg. Training Loss", color='orange', marker='.')
+ax[1].plot(eval_batches, Stat_te_recorded[:, 1], label="Test Loss (Before TTA)", color='green', marker='o', linestyle='--')
+ax[1].plot(eval_batches, Stat_ad_recorded[:, 1], label="Test Loss (After TTA)", color='red', marker='x', linestyle=':')
+ax[1].set_xlabel("Batch Number")
+ax[1].set_ylabel("Loss")
+ax[1].legend()
+ax[1].grid(True)
+
+plt.tight_layout()
+plt.show()
