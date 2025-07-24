@@ -80,7 +80,7 @@ INPUT_FEATURES = 2
 HIDDEN_SIZE = 50
 NUM_CLASSES = 2
 BATCH_SIZE = 20
-N_ITERATIONS = 1000
+N_batch = 1000
 N_EVAL = 10
 LAMBDA_ALIGN = 1 
 
@@ -93,14 +93,14 @@ opt = optim.Adam(params=list(snn_LSTM.parameters()) + list(readout.parameters())
 Loss = nn.CrossEntropyLoss()
 
 N_eval=10
-Stat_tr=torch.zeros([N_ITERATIONS,2])
-Stat_te=torch.zeros([int(N_ITERATIONS/N_eval),2])
-Stat_ad=torch.zeros([int(N_ITERATIONS/N_eval),2])
-Stat_tr_av=torch.zeros([int(N_ITERATIONS/N_eval),2])
+Stat_tr=torch.zeros([N_batch,2])
+Stat_te=torch.zeros([int(N_batch/N_eval),2])
+Stat_ad=torch.zeros([int(N_batch/N_eval),2])
+Stat_tr_av=torch.zeros([int(N_batch/N_eval),2])
 
 print(f"--- Starting Training and Adaptation on {device} ---")
 ind_help = 0
-for n in range(N_ITERATIONS):
+for n in range(N_batch):
     snn_LSTM.train()
     readout.train()
     
@@ -189,7 +189,7 @@ for n in range(N_ITERATIONS):
         ind_help += 1
 
 num_evals = ind_help
-eval_batches = np.arange(N_EVAL, N_ITERATIONS + 1, N_EVAL)[:num_evals]
+eval_batches = np.arange(N_EVAL, N_batch + 1, N_EVAL)[:num_evals]
 
 Stat_tr_av_rec = Stat_tr_av[:num_evals].cpu()
 Stat_te_recorded = Stat_te[:num_evals].cpu()
