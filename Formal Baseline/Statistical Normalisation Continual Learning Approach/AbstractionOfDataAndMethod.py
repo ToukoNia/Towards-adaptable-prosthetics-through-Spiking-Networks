@@ -158,9 +158,6 @@ for n in range(N_batch):
            Stat_te[ind_help,0]=acc_te
            Stat_te[ind_help,1]=loss_te
                       
-        
-        ## FOR ADAPTATION, STORE MODEL'S PARAMETERS HERE
-        #Parameter_before=deepcopy(list(...))
        
         lambda_swd = 1
         snn_LSTM.train()
@@ -222,13 +219,14 @@ Stat_ad = Stat_ad.cpu()
 
 eval_interval = N_eval
 eval_batches = np.arange(eval_interval, N_batch, eval_interval)
-
 num_evals = ind_help
-Stat_te_recorded = Stat_te[:num_evals]
-Stat_ad_recorded = Stat_ad[:num_evals]
-Stat_tr_av_rec=Stat_tr_av[:num_evals]
 
-fig, ax = plt.subplots(2, 1, figsize=(12, 10))
+Stat_tr_av_rec = Stat_tr_av[:num_evals].cpu()
+Stat_te_recorded = Stat_te[:num_evals].cpu()
+Stat_ad_recorded = Stat_ad[:num_evals].cpu()
+
+fig, ax = plt.subplots(3, 1, figsize=(12, 15), sharex=True)
+fig.suptitle("S-LSTM Performance with Statistical Alignment TTA", fontsize=16)
 
 ax[0].set_title("Model Accuracy vs. Batch Number")
 ax[0].plot(Stat_tr_av_rec[:, 0], label="Training Accuracy", alpha=0.7)
@@ -247,6 +245,15 @@ ax[1].set_xlabel("Batch Number")
 ax[1].set_ylabel("Loss")
 ax[1].legend()
 ax[1].grid(True)
+
+ax[2].set_title("Loss Improvement from TTA")
+loss_difference = Stat_te_recorded[:, 1] - Stat_ad_recorded[:, 1]
+ax[2].plot(eval_batches, loss_difference, label="Loss Reduction (Before - After)", color='purple', marker='d')
+ax[2].axhline(0, color='grey', linestyle='--', linewidth=1)
+ax[2].set_xlabel("Batch Number")
+ax[2].set_ylabel("Loss Reduction")
+ax[2].legend()
+ax[2].grid(True)
 
 plt.tight_layout()
 plt.show()
