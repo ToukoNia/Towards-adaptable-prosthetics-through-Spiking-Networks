@@ -12,17 +12,21 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 class Data_Manager(nn.Module):
     
-    def __init__(self, N_data=10, N_features=2, Time=5,device=device):
+    def __init__(self, N_data=10, N_features=3, Time=5,device=device):
         super().__init__()
 
         self.device = device
         self.X_tr=torch.rand([Time,N_data,N_features]).to(self.device)
+        self.X_tr=(self.X_tr-torch.min(self.X_tr))/(torch.max(self.X_tr)-torch.min(self.X_tr))
+        print(self.X_tr)
         self.Y_tr=torch.zeros([N_data,2]).to(self.device)
         self.Y_tr[0:int(N_data/2),0]=1
         self.Y_tr[int(N_data/2):,1]=1
-        self.X_te=self.X_tr*(2*torch.rand([1,N_data,N_features]).to(self.device)-0.5)+torch.rand([1,N_data,N_features]).to(self.device)
+        self.stdShift=2*torch.rand([1,1,N_features]).to(self.device)-0.5
+        self.meanShift=torch.rand([1,1,N_features]).to(self.device)
+        
+        self.X_te=self.X_tr*self.stdShift+self.meanShift
         self.Y_te=self.Y_tr
-
     def Batch(self,batch_size):
 
         rand_ind=torch.randint(0,self.X_tr.size()[1],[batch_size])
@@ -74,14 +78,14 @@ class Classifier(nn.Module):
         return self.fc(z)
     
 
-snn_LSTM=Net_SLSTM_Extractor(inputSize=2,hiddenSize=50,numClasses=2).to(device)
+snn_LSTM=Net_SLSTM_Extractor(inputSize=3,hiddenSize=50,numClasses=2).to(device)
 readout=Classifier(hiddenSize=50,numClasses=2).to(device)
 
 import copy
 
 N_batch=10000
 opt=optim.Adam(params=list(snn_LSTM.parameters())+list(readout.parameters()),lr=1e-3)
-opt_1=optim.Adam(params=list(snn_LSTM.parameters())+list(readout.parameters()),lr=1e-2)
+opt_1=optim.Adam(params=list(snn_LSTM.parameters())+list(readout.parameters()),lr=1e-3)
 
 Loss=torch.nn.CrossEntropyLoss()
 
@@ -90,13 +94,13 @@ N_adapt=100
 
 Stat_tr=torch.zeros([N_batch,2])
 Stat_te=torch.zeros([int(N_batch/N_eval),3,N_adapt])
-
+Stat_tr_ad=torch.zeros([int(N_batch/N_eval),N_adapt])
 
 ind_help=0
 for n in range(N_batch):
-
+    
     x_batch,y_batch=Data.Batch(10)
-
+    
     z, mem1, mem2=snn_LSTM(x_batch)
     y=readout(z)
 
@@ -116,7 +120,7 @@ for n in range(N_batch):
     Stat_tr[n,1] = loss.detach().cpu()
 
 
-    if n%N_eval==0 and n>0:
+    if n%N_eval==0 and n>2000:
         
         ## FOR ADAPTATION, STORE MODEL'S PARAMETERS HERE
         #Parameter_before=deepcopy(list(...))
@@ -128,15 +132,19 @@ for n in range(N_batch):
         ## ADAPT
         x_batch,y_batch=Data.Test()
         mem1,mem2=mem1.detach(),mem2.detach()
-        alpha,beta=1,1.1
+        alpha,beta=1,1
         for l in range(N_adapt):
             z, mem1_te, mem2_te=snn_LSTM(x_batch)
             y=readout(z)
             loss_te=Loss(y,y_batch)
             #loss=torch.pow(mem1_te.mean(0)-mem1.mean(0),2).mean()+torch.pow(mem2_te.mean(0)-mem2.mean(0),2).mean()
             #loss=torch.pow(mem1_te-mem1,2).mean()+torch.pow(mem2_te-mem2,2).mean()
-            meanLoss=torch.pow(mem1_te.mean(0)-mem1.mean(0),2).mean()+torch.pow(mem2_te.mean(0)-mem2.mean(0),2).mean()
-            std_loss=torch.pow(mem1_te.std(0)-mem1.std(0),2).mean()+torch.pow(mem2_te.std(0)-mem2.std(0),2).mean()
+            
+            stdShift=x_batch.std(0).mean(0)
+            meanShift=x_batch.mean(0).mean(0)
+            meanLoss=torch.pow(mem1_te.mean(0).mean(0)-mem1.mean(0).mean(0),2).mean()+torch.pow(mem2_te.mean(0).mean(0)-mem2.mean(0).mean(0),2).mean()
+            std_loss=torch.pow(mem1_te.std(0).mean(0)-mem1.std(0).mean(0),2).mean()+torch.pow(mem2_te.std(0).mean(0)-mem2.std(0).mean(0),2).mean()
+            
             statLoss = meanLoss + std_loss
             
             zDER, _,_=snn_LSTM(xDERBatch)
@@ -156,14 +164,19 @@ for n in range(N_batch):
             Stat_te[ind_help,0,l]=acc_te
             Stat_te[ind_help,1,l]=loss_te.detach()
             Stat_te[ind_help,2,l]=loss.detach()
-
+            
+            x_batch,y_batch=Data.Batch(5)
+            z, _,_=snn_LSTM(x_batch)
+            y=readout(z)
+            lossTrAd=nn.CrossEntropyLoss()(y,y_batch)
+            Stat_tr_ad[ind_help,l]=lossTrAd.detach()
 
         snn_LSTM.load_state_dict(snn_lstm_state_before)
         readout.load_state_dict(readout_state_before)
 
         print('Training :', n, Stat_tr[n-N_eval:n,:].mean(0))
         print('Testing :', n, Stat_te[ind_help,0,:], Stat_te[ind_help,1,:], Stat_te[ind_help,2,:])
-        
+        print("Train Dataset after Adaption", n, Stat_tr_ad[ind_help,:])
         
         ind_help+=1
    

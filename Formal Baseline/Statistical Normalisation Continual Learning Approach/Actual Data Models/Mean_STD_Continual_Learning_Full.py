@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Created on Tue Jul  8 18:15:53 2025
+Created on Fri Jul 25 18:15:53 2025
 
 @author: Nia Touko
 """
@@ -30,8 +30,8 @@ numRepetitions = 12
 numChannels = 14
 windowSize=400
 TESTTHRESHOLD=0.3
-inp = int(float(sys.argv[1]))
-
+#inp = int(float(sys.argv[1]))
+inp=1
 class Net_SLSTM_Extractor(nn.Module):
     def __init__(self, inputSize=2, hiddenSize=128, numClasses=8):
         super().__init__()
@@ -71,7 +71,7 @@ class DERBuffer:
     def __init__(self, device):
         self.x = None
         self.y = None
-        self.y_comp = None
+        self.yComp = None
         self.mem1 = None
         self.mem2 = None
         self.device = device
@@ -79,7 +79,7 @@ class DERBuffer:
     def update(self, x, y, y_comp, mem1, mem2):
         self.x = x.clone().detach().to(self.device)
         self.y = y.clone().detach().to(self.device)
-        self.y_comp = y_comp.clone().detach().to(self.device)
+        self.yComp = y_comp.clone().detach().to(self.device)
         self.mem1 = mem1.clone().detach().to(self.device)
         self.mem2 = mem2.clone().detach().to(self.device)
         
@@ -116,7 +116,7 @@ def loadDataset(mat_paths, windowSize=windowSize, overlapR=0.5, numClasses=numGe
     
     return TensorDataset(x, y)
 
-def loadAndSplitPerSession(matPaths, testSize=TESTTHRESHOLD, doEncode=0):
+def loadAndSplitPerSession(matPaths, testSize=TESTTHRESHOLD, doEncode=0):   #Needs to be changed before I can implement the extracting full gesture here
 
     allTrainX, allTrainY = [], []
     allTestX, allTestY = [], []
@@ -171,6 +171,28 @@ def loadAndSplitPerSession(matPaths, testSize=TESTTHRESHOLD, doEncode=0):
 
     return trainDataset, testDataset
 
+def extractOneOfEachGesture(dataset):    #should allow me to get the test dataset and DER Buffer
+    uniqueLabels=[0,1,2,3,4,5,6,7]   
+    X=list()
+    Y=list()    
+    lastY=-1
+    for x,y in dataset:
+        if lastY==y:
+            X.append(x)
+            Y.append(y)
+        else:
+            lastY=-1
+        if y in uniqueLabels:
+            X.append(x)
+            Y.append(y)
+            lastY=y
+            uniqueLabels.remove(y)
+    if uniqueLabels:
+        print("Error, couldn't find", uniqueLabels)
+    X = torch.stack(X)
+    Y = torch.stack(Y)
+    return TensorDataset(X,Y)
+
 class DataNormaliser():
     def __init__(self):
         self.mean=0
@@ -196,7 +218,7 @@ def fileFinder(dataDirectory):
         
     return matFilePaths
 
-def trainNetwork(encoder,classifier,trainLoader,testLoader1,testLoader2,numEpochs,loss_fn,optimiser,adaptOpt):
+def trainNetwork(encoder,classifier,trainLoader,testLoader1,testLoader2,numEpochs,loss_fn,optimiser,adaptOpt,derLoader,ttaLoader):
     #Training Settings
     history = {
        'train_loss': [], 'train_acc': [],
@@ -205,7 +227,11 @@ def trainNetwork(encoder,classifier,trainLoader,testLoader1,testLoader2,numEpoch
        'inter_pre_acc':[], 'inter_pre_loss':[],'inter_acc_best': [], 'inter_acc_worst': [], 'inter_acc_mean': [], 'inter_acc_final': [],
         'inter_loss_best': [], 'inter_loss_worst': [], 'inter_loss_mean': [], 'inter_loss_final': [],
    }
-    der_buffer=DERBuffer(device)
+    derBuffer=DERBuffer(device)
+    x_der, y_der = next(iter(derLoader))
+    derBuffer.x = x_der.permute(1, 0, 2).to(device)
+    derBuffer.y = y_der.to(device)
+    print(f"DER Buffer initialized with {len(derBuffer.y)} samples.")
     for epoch in range(numEpochs):
         encoder.train()
         classifier.train()
@@ -222,7 +248,6 @@ def trainNetwork(encoder,classifier,trainLoader,testLoader1,testLoader2,numEpoch
             optimiser.zero_grad()
             loss.backward()
             optimiser.step()
-            der_buffer.update(x, y, output, mem1, mem2)
             #updates the readOuts
             totalLoss += loss.item()
             _, predictions = torch.max(output, 1)
@@ -231,23 +256,32 @@ def trainNetwork(encoder,classifier,trainLoader,testLoader1,testLoader2,numEpoch
         history['train_loss'].append(totalLoss / len(trainLoader))
         history['train_acc'].append(currentAccuracy)
 
+        encoder.eval()
+        classifier.eval()
+        with torch.no_grad():
+            z_der, mem1_der, mem2_der = encoder(derBuffer.x)
+            output_der = classifier(z_der)
         
-        intraResults=TTATester(encoder, classifier, der_buffer,testLoader1, adaptOpt)
-        InterResults=TTATester(encoder, classifier, der_buffer,testLoader2, adaptOpt)
+        derBuffer.yComp = output_der.clone().detach()
+        derBuffer.mem1 = mem1_der.clone().detach()
+        derBuffer.mem2 = mem2_der.clone().detach()
+        
+        intraResults=TTATester(encoder, classifier, derBuffer, testLoader1, ttaLoader, adaptOpt)
+        #InterResults=TTATester(encoder, classifier, derBuffer,testLoader2, adaptOpt)
         
         for key, value in intraResults.items(): history[f'intra_{key}'].append(value)
-        for key, value in InterResults.items(): history[f'inter_{key}'].append(value)
+        #for key, value in InterResults.items(): history[f'inter_{key}'].append(value)
         
         print(f"Epoch {epoch+1}/{numEpochs} | Train Acc: {history['train_acc'][-1]:.2f}% | "
              f"Intra-TTA Final Acc: {history['intra_acc_final'][-1]:.2f}% (Best: {history['intra_acc_best'][-1]:.2f}%) | "
              f"Inter-TTA Final Acc: {history['inter_acc_final'][-1]:.2f}% (Best: {history['inter_acc_best'][-1]:.2f}%)")
     return history
 
-def TTATester(encoder, classifier, der_buffer,dataLoader, adaptOpt):  
+def TTATester(encoder, classifier, der_buffer,dataLoader, ttaLoader,adaptOpt):  
     encoder_state_before = copy.deepcopy(encoder.state_dict())
     classifier_state_before = copy.deepcopy(classifier.state_dict())
     
-    results = TTA(encoder,classifier,der_buffer,dataLoader,adaptOpt)
+    results = TTA(encoder,classifier,der_buffer,dataLoader, ttaLoader,adaptOpt)
     
     encoder.load_state_dict(encoder_state_before)
     classifier.load_state_dict(classifier_state_before)
@@ -273,7 +307,7 @@ def testNetwork(encoder,classifier, testLoader,loss_fn):
         testLoss=testLoss / len(testLoader)
     return testAccuracy,testLoss
 
-def TTA(encoder,classifier,der_buffer,dataLoader,adaptOpt,alpha=1,beta=1.1,nAdaption=5):    #Need to make this not loop through the whole dataset, maybe make it take one example of each gesture type and use that?
+def TTA(encoder,classifier,der_buffer,dataLoader,ttaLoader, adaptOpt,alpha=1,beta=1,nAdaption=5):    #Need to make this not loop through the whole dataset, maybe make it take one example of each gesture type and use that?
     ttaAcc,ttaLoss=[],[]
     lossFn=nn.CrossEntropyLoss()
     preAcc, preLoss = testNetwork(encoder, classifier, dataLoader, lossFn)
@@ -281,12 +315,11 @@ def TTA(encoder,classifier,der_buffer,dataLoader,adaptOpt,alpha=1,beta=1.1,nAdap
     encoder.train()
     classifier.train()
     for _ in range(nAdaption):
-        for x_batch,_ in dataLoader:
+        for x_batch,_ in ttaLoader:    # Create an experience replay buffer 1 example buffer per session, rerun the model before the adaption step, one example of each gesture and only on intra
             x_batch = x_batch.permute(1, 0, 2).to(device)
             z, mem1_te, mem2_te=encoder(x_batch)
-        
-            meanLoss=torch.pow(mem1_te.mean(0)-der_buffer.mem1.mean(0),2).mean()+torch.pow(mem2_te.mean(0)-der_buffer.mem2.mean(0),2).mean()
-            std_loss=torch.pow(mem1_te.std(0)-der_buffer.mem1.std(0),2).mean()+torch.pow(mem2_te.std(0)-der_buffer.mem2.std(0),2).mean()
+            meanLoss=torch.pow(mem1_te.mean(0).mean(0)-der_buffer.mem1.mean(0).mean(0),2).mean()+torch.pow(mem2_te.mean(0).mean(0)-der_buffer.mem2.mean(0).mean(0),2).mean()
+            std_loss=torch.pow(mem1_te.std(0).mean(0)-der_buffer.mem1.std(0).mean(0),2).mean()+torch.pow(mem2_te.std(0).mean(0)-der_buffer.mem2.std(0).mean(0),2).mean()
             statLoss = meanLoss + std_loss
             
             zDER, _,_=encoder(der_buffer.x)
@@ -307,23 +340,24 @@ def TTA(encoder,classifier,der_buffer,dataLoader,adaptOpt,alpha=1,beta=1.1,nAdap
         'acc_final': ttaAcc[-1], 'loss_final': ttaLoss[-1],
     }
     return results
-            
-    
+     
+
+        
 def plot_results(history, subject_id):
     df = pd.DataFrame(history)
     plt.style.use('seaborn-v0_8-whitegrid')
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(18, 16), sharex=True)
     fig.suptitle(f'Subject {subject_id} - Detailed Training and TTA Performance', fontsize=18)
 
-    # --- ACCURACY PLOT ---
+    # plot the accuracies
     ax1.set_title('Model Accuracy', fontsize=14)
     ax1.plot(df['train_acc'], label='Train Accuracy', color='black', linewidth=2, linestyle='-')
-    # Intra-Session Accuracy (Green/Orange/Red Tones)
+    # intra-session 
     ax1.plot(df['intra_acc_pre'], label='Intra: Pre-TTA', color='#ff6347', linestyle=':') # Tomato
     ax1.plot(df['intra_acc_mean'], label='Intra: TTA Mean', color='#ffa500', linestyle='--') # Orange
     ax1.plot(df['intra_acc_best'], label='Intra: TTA Best', color='#228b22', linewidth=1.5) # ForestGreen
     ax1.fill_between(df.index, df['intra_acc_worst'], df['intra_acc_best'], color='green', alpha=0.1, label='Intra: TTA Range (Worst-Best)')
-    # Inter-Session Accuracy (Blue/Purple Tones)
+    # inter-session
     ax1.plot(df['inter_acc_pre'], label='Inter: Pre-TTA', color='#87ceeb', linestyle=':') # SkyBlue
     ax1.plot(df['inter_acc_mean'], label='Inter: TTA Mean', color='#9370db', linestyle='--') # MediumPurple
     ax1.plot(df['inter_acc_best'], label='Inter: TTA Best', color='#0000cd', linewidth=1.5) # MediumBlue
@@ -332,15 +366,15 @@ def plot_results(history, subject_id):
     ax1.legend(loc='best', fontsize='small')
     ax1.grid(True)
 
-    # --- LOSS PLOT ---
+    # plot the losses
     ax2.set_title('Model Loss', fontsize=14)
     ax2.plot(df['train_loss'], label='Train Loss', color='black', linewidth=2, linestyle='-')
-    # Intra-Session Loss
+    # intra-session
     ax2.plot(df['intra_loss_pre'], label='Intra: Pre-TTA', color='#ff6347', linestyle=':')
     ax2.plot(df['intra_loss_mean'], label='Intra: TTA Mean', color='#ffa500', linestyle='--')
     ax2.plot(df['intra_loss_best'], label='Intra: TTA Best (Min Loss)', color='#228b22', linewidth=1.5)
     ax2.fill_between(df.index, df['intra_loss_best'], df['intra_loss_worst'], color='green', alpha=0.1, label='Intra: TTA Range (Best-Worst)')
-    # Inter-Session Loss
+    # inter-session 
     ax2.plot(df['inter_loss_pre'], label='Inter: Pre-TTA', color='#87ceeb', linestyle=':')
     ax2.plot(df['inter_loss_mean'], label='Inter: TTA Mean', color='#9370db', linestyle='--')
     ax2.plot(df['inter_loss_best'], label='Inter: TTA Best (Min Loss)', color='#0000cd', linewidth=1.5)
@@ -379,31 +413,38 @@ def createStratifiedSplit(fullDataset, testSize):
 
 def SubjectChecker(loss_fn,i,encode=0):
 
-    matFilePaths=fileFinder(r'/home/coa23nt/EMG-SNN/Data/DB6_s%s_a'%i)+fileFinder(r'/home/coa23nt/EMG-SNN/Data/DB6_s%s_b'%i)
+    #matFilePaths=fileFinder(r'/home/coa23nt/EMG-SNN/Data/DB6_s%s_a'%i)+fileFinder(r'/home/coa23nt/EMG-SNN/Data/DB6_s%s_b'%i)
+    matFilePaths=fileFinder(r'..\..\..\Data\DB6_s%s_a' %i)+fileFinder(r'..\..\..\Data\DB6_s%s_b'%i)
     dataPaths=matFilePaths[:7]
     targetDataPath=matFilePaths[7:]
     testDataIntra=loadDataset(targetDataPath,doEncode=encode)
-    trainData,testDataInter= loadAndSplitPerSession(dataPaths) 
-    
+    #trainData,testDataInter= loadAndSplitPerSession(dataPaths) 
+    trainData=loadDataset(dataPaths,doEncode=encode)
     normaliseData=DataNormaliser()
 
     
-    if not encode:
+    if not encode:  
         trainData=normaliseData.forwardTrain(trainData)
-        testDataInter=normaliseData.forward(testDataInter)
+        #testDataInter=normaliseData.forward(testDataInter)
         testDataIntra=normaliseData.forward(testDataIntra)
      
+    TTASamples=extractOneOfEachGesture(testDataIntra)
+    DERSamples=extractOneOfEachGesture(trainData)
+    TTALoader=DataLoader(TTASamples,batch_size=batchSize,shuffle=True)
+    DERLoader=DataLoader(DERSamples,batch_size=len(DERSamples),shuffle=True)
     
     trainLoader=DataLoader(trainData, batch_size=batchSize, shuffle=True)
     testLoaderIntra=DataLoader(testDataIntra,batch_size=batchSize,shuffle=False)
-    testLoaderInter=DataLoader(testDataInter,batch_size=batchSize,shuffle=False)
-    
+    #testLoaderInter=DataLoader(testDataInter,batch_size=batchSize,shuffle=False)
+
+    testLoaderInter = DataLoader(TensorDataset(torch.empty(0, 14), torch.empty(0)), batch_size=batchSize)
+
     #Load and run the network
-    snn_LSTM=Net_SLSTM_Extractor(inputSize=numChannels, hiddenSize=128)
-    readout=Classifier(hiddenSize=128, numClasses=numGestures)
+    snn_LSTM=Net_SLSTM_Extractor(inputSize=numChannels, hiddenSize=128).to(device)
+    readout=Classifier(hiddenSize=128, numClasses=numGestures).to(device)
     optimiser = torch.optim.Adam(params=list(snn_LSTM.parameters())+list(readout.parameters()), lr=1e-3)
     adaptOpt=torch.optim.Adam(params=list(snn_LSTM.parameters())+list(readout.parameters()),lr=1e-2)
-    history=trainNetwork(snn_LSTM,readout,trainLoader,testLoaderIntra,testLoaderInter,numEpochs,loss_fn,optimiser,adaptOpt)
+    history=trainNetwork(snn_LSTM,readout,trainLoader,testLoaderIntra,testLoaderInter,numEpochs,loss_fn,optimiser,adaptOpt,DERLoader,TTALoader)
     
     
     results_df = pd.DataFrame(history)
