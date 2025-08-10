@@ -228,9 +228,13 @@ def trainNetwork(encoder,classifier,trainLoader,testLoader1,testLoader2,numEpoch
         'inter_loss_best': [], 'inter_loss_worst': [], 'inter_loss_mean': [], 'inter_loss_final': [],
    }
     derBuffer=DERBuffer(device)
-    x_der, y_der = next(iter(derLoader))
-    derBuffer.x = x_der.permute(1, 0, 2).to(device)
-    derBuffer.y = y_der.to(device)
+    der_x_list, der_y_list = [], []
+    for x_der_batch, y_der_batch in derLoader:
+        der_x_list.append(x_der_batch)
+        der_y_list.append(y_der_batch)
+    
+    derBuffer.x = torch.cat(der_x_list).permute(1, 0, 2).to(device)
+    derBuffer.y = torch.cat(der_y_list).to(device)
     print(f"DER Buffer initialized with {len(derBuffer.y)} samples.")
     for epoch in range(numEpochs):
         encoder.train()
@@ -258,23 +262,37 @@ def trainNetwork(encoder,classifier,trainLoader,testLoader1,testLoader2,numEpoch
 
         encoder.eval()
         classifier.eval()
-        with torch.no_grad():
-            z_der, mem1_der, mem2_der = encoder(derBuffer.x)
-            output_der = classifier(z_der)
+        all_mem1_der, all_mem2_der, all_output_der = [], [], []
         
-        derBuffer.yComp = output_der.clone().detach()
-        derBuffer.mem1 = mem1_der.clone().detach()
-        derBuffer.mem2 = mem2_der.clone().detach()
+        with torch.no_grad():
+            # Loop through DER data in batches to avoid memory issues
+            for x_der_batch, _ in derLoader:
+                x_der_batch = x_der_batch.permute(1, 0, 2).to(device)
+                z_der, mem1_der, mem2_der = encoder(x_der_batch)
+                output_der = classifier(z_der)
+                
+                # Collect the stats from each batch
+                all_output_der.append(output_der)
+                all_mem1_der.append(mem1_der)
+                all_mem2_der.append(mem2_der)
+
+        # Concatenate the stats from all batches before updating the buffer
+        derBuffer.yComp = torch.cat(all_output_der)
+        # Note: mems are [time, batch, features], so we cat along the batch dim (1)
+        derBuffer.mem1 = torch.cat(all_mem1_der, dim=1)
+        derBuffer.mem2 = torch.cat(all_mem2_der, dim=1)
+        
         
         intraResults=TTATester(encoder, classifier, derBuffer, testLoader1, ttaLoader, adaptOpt)
-        #InterResults=TTATester(encoder, classifier, derBuffer,testLoader2, adaptOpt)
+        #InterResults= testNetwork(encoder,classifier, testLoader2,loss_fn)
+      
         
         for key, value in intraResults.items(): history[f'intra_{key}'].append(value)
         #for key, value in InterResults.items(): history[f'inter_{key}'].append(value)
         
         print(f"Epoch {epoch+1}/{numEpochs} | Train Acc: {history['train_acc'][-1]:.2f}% | "
              f"Intra-TTA Final Acc: {history['intra_acc_final'][-1]:.2f}% (Best: {history['intra_acc_best'][-1]:.2f}%) | "
-             f"Inter-TTA Final Acc: {history['inter_acc_final'][-1]:.2f}% (Best: {history['inter_acc_best'][-1]:.2f}%)")
+             f"Intra Pre Acc: {history['intra_pre_acc'][-1]:.2f}%")
     return history
 
 def TTATester(encoder, classifier, der_buffer,dataLoader, ttaLoader,adaptOpt):  
@@ -411,6 +429,17 @@ def createStratifiedSplit(fullDataset, testSize):
 
     return trainSet, testSet
 
+def extractGesturePerSession(listDatasets):
+    samplesList=list()
+    for sessionData in listDatasets:
+        gestureExtraction = extractOneOfEachGesture(sessionData)
+        samplesList.append(gestureExtraction)
+        
+    X = torch.cat([ds.tensors[0] for ds in samplesList])
+    Y = torch.cat([ds.tensors[1] for ds in samplesList])
+    sampleDataset = TensorDataset(X, Y)
+    return sampleDataset
+    
 def SubjectChecker(loss_fn,i,encode=0):
 
     #matFilePaths=fileFinder(r'/home/coa23nt/EMG-SNN/Data/DB6_s%s_a'%i)+fileFinder(r'/home/coa23nt/EMG-SNN/Data/DB6_s%s_b'%i)
@@ -421,24 +450,29 @@ def SubjectChecker(loss_fn,i,encode=0):
     #trainData,testDataInter= loadAndSplitPerSession(dataPaths) 
     trainData=loadDataset(dataPaths,doEncode=encode)
     normaliseData=DataNormaliser()
-
     
+    testListDataset = [loadDataset([path], doEncode=encode) for path in targetDataPath]
+    trainListDataset = [loadDataset([path], doEncode=encode) for path in dataPaths]
     if not encode:  
         trainData=normaliseData.forwardTrain(trainData)
         #testDataInter=normaliseData.forward(testDataInter)
         testDataIntra=normaliseData.forward(testDataIntra)
-     
-    TTASamples=extractOneOfEachGesture(testDataIntra)
-    DERSamples=extractOneOfEachGesture(trainData)
-    TTALoader=DataLoader(TTASamples,batch_size=batchSize,shuffle=True)
-    DERLoader=DataLoader(DERSamples,batch_size=len(DERSamples),shuffle=True)
+        testListDataset = [normaliseData.forward(ds) for ds in testListDataset]
+        trainListDataset=[normaliseData.forward(ds) for ds in trainListDataset]
     
+    DERSamples=extractGesturePerSession(trainListDataset)
+    TTASamples=extractGesturePerSession(testListDataset)
+    
+    TTALoader=DataLoader(TTASamples,batch_size=batchSize,shuffle=True)
+    DERLoader=DataLoader(DERSamples,batch_size=batchSize,shuffle=True)
+    
+    #trainData,testDataInter= loadAndSplitPerSession(dataPaths) 
     trainLoader=DataLoader(trainData, batch_size=batchSize, shuffle=True)
     testLoaderIntra=DataLoader(testDataIntra,batch_size=batchSize,shuffle=False)
     #testLoaderInter=DataLoader(testDataInter,batch_size=batchSize,shuffle=False)
-
-    testLoaderInter = DataLoader(TensorDataset(torch.empty(0, 14), torch.empty(0)), batch_size=batchSize)
-
+    testLoaderInter= DataLoader(TensorDataset(torch.empty(0, 14), torch.empty(0)), batch_size=batchSize)
+    print(f"Created TTASamples dataset with {len(TTASamples)} windows.")
+    print(f"Created combined testDataIntra with {len(testDataIntra)} windows.")
     #Load and run the network
     snn_LSTM=Net_SLSTM_Extractor(inputSize=numChannels, hiddenSize=128).to(device)
     readout=Classifier(hiddenSize=128, numClasses=numGestures).to(device)
@@ -455,7 +489,7 @@ def SubjectChecker(loss_fn,i,encode=0):
     torch.save(model_state,r"Subject_%s_SLSTM_TAB" % i)    
             
     
-numEpochs=15
+numEpochs=3
 batchSize=128
 
     
