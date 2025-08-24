@@ -1,0 +1,4 @@
+Beta=1
+
+Ran for 100 steps at an adapt optimiser of 5e-3, could do with maybe 1e-2?
+
