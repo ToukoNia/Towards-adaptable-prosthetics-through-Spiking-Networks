@@ -143,35 +143,7 @@ class Data_Manager(nn.Module):
 Data=Data_Manager()
 numChannels=14
 
-   
-def rbf_kernel(X, Y, kernel_mul=2.0, kernel_num=5):
-    dist_sq = torch.cdist(X, Y, p=2).pow(2)
-    # --- End of fix ---
-    with torch.no_grad():
-        total = torch.cat([X, Y], dim=0)
-        total_dist_sq = torch.cdist(total, total, p=2).pow(2)
-        bandwidth = total_dist_sq[total_dist_sq > 0].median()
-    
-    bandwidth /= kernel_mul ** (kernel_num // 2)
-    bandwidth_list = [bandwidth * (kernel_mul**i) for i in range(kernel_num)]
-    
-    # RBF kernel formula
-    kernel_val = [torch.exp(-dist_sq / (bw + 1e-10)) for bw in bandwidth_list]
-    
-    return sum(kernel_val)
 
-def MMDLoss(source, target, kernel_mul=2.0, kernel_num=5, fix_sigma=None):
-    """
-    Calculates the MMD loss. This version handles different batch sizes.
-    """
-    # Calculate the three components of the MMD loss
-    xx = rbf_kernel(source, source, kernel_mul, kernel_num)
-    yy = rbf_kernel(target, target, kernel_mul, kernel_num)
-    xy = rbf_kernel(source, target, kernel_mul, kernel_num)
-
-    # The MMD loss is the mean of each component
-    loss = torch.mean(xx) + torch.mean(yy) - 2 * torch.mean(xy)
-    return loss
 
 
 snn_LSTM=Net_SLSTM_Extractor(inputSize=3,hiddenSize=50,numClasses=2).to(device)
