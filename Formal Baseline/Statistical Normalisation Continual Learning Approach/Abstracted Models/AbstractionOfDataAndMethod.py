@@ -18,20 +18,25 @@ from SLSTM_GMM_Model import Net_SLSTM_Extractor,Classifier
 from SLSTM_GMM_Model import sliced_wasserstein_distance, GMM
 import copy
 import torch.nn.functional as F
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
 class Data_Manager(nn.Module):
-    
-    def __init__(self, N_data=10, N_features=2, Time=5):
+    def __init__(self, N_data=10, N_features=3, Time=5,device=device):
         super().__init__()
 
-        self.X_tr=torch.rand([Time,N_data,N_features])
-        self.Y_tr=torch.zeros([N_data,2])
-
+        self.device = device
+        self.X_tr=torch.rand([Time,N_data,N_features]).to(self.device)
+        self.X_tr=(self.X_tr-torch.min(self.X_tr))/(torch.max(self.X_tr)-torch.min(self.X_tr))
+        print(self.X_tr)
+        self.Y_tr=torch.zeros([N_data,2]).to(self.device)
         self.Y_tr[0:int(N_data/2),0]=1
         self.Y_tr[int(N_data/2):,1]=1
-
-        self.X_te=self.X_tr*(2*torch.rand([1,N_data,N_features])-0.5)+torch.rand([1,N_data,N_features])
+        self.stdShift=2*torch.rand([1,1,N_features]).to(self.device)-0.5
+        self.meanShift=torch.rand([1,1,N_features]).to(self.device)
+        
+        self.X_te=self.X_tr*self.stdShift+self.meanShift
         self.Y_te=self.Y_tr
-
     def Batch(self,batch_size):
 
         rand_ind=torch.randint(0,self.X_tr.size()[1],[batch_size])

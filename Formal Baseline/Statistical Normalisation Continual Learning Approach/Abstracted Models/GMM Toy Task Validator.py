@@ -10,37 +10,8 @@ from snntorch import surrogate
 import torch.nn.functional as F
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-class Data_Manager(nn.Module):
-    
-    def __init__(self, N_data=10, N_features=3, Time=5,device=device):
-        super().__init__()
+import torch
 
-        self.device = device
-        self.X_tr=torch.rand([Time,N_data,N_features]).to(self.device)
-        self.X_tr=(self.X_tr-torch.min(self.X_tr))/(torch.max(self.X_tr)-torch.min(self.X_tr))
-        print(self.X_tr)
-        self.Y_tr=torch.zeros([N_data,2]).to(self.device)
-        self.Y_tr[0:int(N_data/2),0]=1
-        self.Y_tr[int(N_data/2):,1]=1
-        self.stdShift=2*torch.rand([1,1,N_features]).to(self.device)-0.5
-        self.meanShift=torch.rand([1,1,N_features]).to(self.device)
-        
-        self.X_te=self.X_tr*self.stdShift+self.meanShift
-        self.Y_te=self.Y_tr
-    def Batch(self,batch_size):
-
-        rand_ind=torch.randint(0,self.X_tr.size()[1],[batch_size])
-
-        x=self.X_tr[:,rand_ind,:]
-        y=self.Y_tr[rand_ind,:]
-
-        return x, y
-
-    def Test(self):
-
-        return self.X_te, self.Y_te
-Data=Data_Manager()
-numChannels=14
 class Net_SLSTM_Extractor(nn.Module):
     def __init__(self, inputSize=2, hiddenSize=128, numClasses=8):
         super().__init__()
@@ -76,6 +47,102 @@ class Classifier(nn.Module):
 
     def forward(self, z):
         return self.fc(z)
+
+from torch.distributions import Categorical, MultivariateNormal, MixtureSameFamily
+
+# GMM Utility Class
+class GMM:
+    def __init__(self, n_components, n_features, device):
+        self.n_components = n_components
+        self.n_features = n_features
+        self.device = device
+        self.mus = None
+        self.covs = None
+        self.alphas = None
+        self.gmm_dist = None
+
+    def fit(self, latent_vectors, labels):
+        if labels.ndim > 1:
+            _, labels = torch.max(labels, 1)
+        unique_labels = torch.unique(labels)
+        if self.n_components!= len(unique_labels):
+            raise ValueError("Number of components must match number of labels. Please check this number :)")
+
+        mus, covs, alphas =[],[],[]
+        
+        for j in sorted(unique_labels.cpu().numpy()):
+            class_vectors = latent_vectors[labels == j]
+            num_samples = len(class_vectors)
+
+            # Estimate mixture weight, mean, and covariance [1]
+            alpha = len(class_vectors) / len(latent_vectors)
+            mu = torch.mean(class_vectors, dim=0)
+            if num_samples < 2:
+                    # If not enough samples to compute covariance, use an identity matrix
+                    cov = torch.eye(self.n_features, device=self.device)
+            else:
+                # Otherwise, compute covariance normally
+                cov = torch.cov(class_vectors.T) + torch.eye(self.n_features, device=self.device) * 1e-6
+            alphas.append(torch.tensor(alpha, device=self.device))
+            mus.append(mu)
+            covs.append(cov)
+
+        self.alphas = torch.stack(alphas)
+        self.mus = torch.stack(mus)
+        self.covs = torch.stack(covs)
+
+        mix = Categorical(self.alphas)
+        comp = MultivariateNormal(self.mus, self.covs)
+        self.gmm_dist = MixtureSameFamily(mix, comp)
+
+    def sample(self, num_samples):
+
+        if self.gmm_dist is None:
+            raise RuntimeError("GMM must be fitted before sampling.")
+        component_indices = self.gmm_dist.mixture_distribution.sample((num_samples,))
+        all_means = self.gmm_dist.component_distribution.loc
+        all_covs = self.gmm_dist.component_distribution.covariance_matrix
+        selected_means = all_means[component_indices]
+        selected_covs = all_covs[component_indices]
+        temp_dist = torch.distributions.MultivariateNormal(
+        loc=selected_means, 
+        covariance_matrix=selected_covs
+        )
+        samples = temp_dist.sample()
+        
+        return samples, component_indices
+class Data_Manager(nn.Module):
+    
+    def __init__(self, N_data=10, N_features=3, Time=5,device=device):
+        super().__init__()
+
+        self.device = device
+        self.X_tr=torch.rand([Time,N_data,N_features]).to(self.device)
+        self.X_tr=(self.X_tr-torch.min(self.X_tr))/(torch.max(self.X_tr)-torch.min(self.X_tr))
+        print(self.X_tr)
+        self.Y_tr=torch.zeros([N_data,2]).to(self.device)
+        self.Y_tr[0:int(N_data/2),0]=1
+        self.Y_tr[int(N_data/2):,1]=1
+        self.stdShift=2*torch.rand([1,1,N_features]).to(self.device)-0.5
+        self.meanShift=torch.rand([1,1,N_features]).to(self.device)
+        
+        self.X_te=self.X_tr*self.stdShift+self.meanShift
+        self.Y_te=self.Y_tr
+    def Batch(self,batch_size):
+
+        rand_ind=torch.randint(0,self.X_tr.size()[1],[batch_size])
+
+        x=self.X_tr[:,rand_ind,:]
+        y=self.Y_tr[rand_ind,:]
+
+        return x, y
+
+    def Test(self):
+
+        return self.X_te, self.Y_te
+Data=Data_Manager()
+numChannels=14
+
    
 def rbf_kernel(X, Y, kernel_mul=2.0, kernel_num=5):
     dist_sq = torch.cdist(X, Y, p=2).pow(2)
@@ -111,6 +178,34 @@ snn_LSTM=Net_SLSTM_Extractor(inputSize=3,hiddenSize=50,numClasses=2).to(device)
 readout=Classifier(hiddenSize=50,numClasses=2).to(device)
 
 import copy
+
+def swd(source_samples, target_samples, n_projections=50):
+
+    n_features = source_samples.size(1)
+    
+    projections = torch.randn(n_features, n_projections, device=source_samples.device)
+    projections = projections / torch.norm(projections, dim=0, keepdim=True) # Normalize
+
+    source_proj = torch.matmul(source_samples, projections)
+    target_proj = torch.matmul(target_samples, projections)
+
+    source_proj_sorted, _ = torch.sort(source_proj, dim=0)
+    target_proj_sorted, _ = torch.sort(target_proj, dim=0)
+
+    distance = torch.abs(source_proj_sorted - target_proj_sorted).mean()
+    
+    return distance
+
+def consolidated_loss(encTarg, gmm, classifier, lambdaSwd, batchSize):
+    pseudoSamples,pseudoLabels = gmm.sample(batchSize)
+    #Classifier Loss    
+    classifierOut = classifier(pseudoSamples)
+    lossClass = nn.CrossEntropyLoss()(classifierOut, pseudoLabels)
+    lossClass=0
+    #Distribution Allignment
+    lossSwd = swd(encTarg, pseudoSamples)
+    total = lossClass + lambdaSwd * lossSwd
+    return total, lossClass, lossSwd
 
 N_batch=10000
 opt=optim.Adam(params=list(snn_LSTM.parameters())+list(readout.parameters()),lr=1e-3)
@@ -158,6 +253,8 @@ for n in range(N_batch):
         readout_state_before = copy.deepcopy(readout.state_dict())
         
         xDERBatch,yDERBatch,DERy=x_batch,y_batch,y.detach()
+        gmm = GMM(n_components=2, n_features=50, device=device)
+        gmm.fit(z, y_batch)
         ## ADAPT
         x_batch,y_batch=Data.Test()
         mem1,mem2=mem1.detach(),mem2.detach()
@@ -169,14 +266,10 @@ for n in range(N_batch):
             #loss=torch.pow(mem1_te.mean(0)-mem1.mean(0),2).mean()+torch.pow(mem2_te.mean(0)-mem2.mean(0),2).mean()
             #loss=torch.pow(mem1_te-mem1,2).mean()+torch.pow(mem2_te-mem2,2).mean()
             
-            stdShift=x_batch.std(0).mean(0)
-            meanShift=x_batch.mean(0).mean(0)
-            meanLoss=torch.pow(mem1_te.mean(0).mean(0)-mem1.mean(0).mean(0),2).mean()+torch.pow(mem2_te.mean(0).mean(0)-mem2.mean(0).mean(0),2).mean()
-            std_loss=torch.pow(mem1_te.std(0).mean(0)-mem1.std(0).mean(0),2).mean()+torch.pow(mem2_te.std(0).mean(0)-mem2.std(0).mean(0),2).mean()
-            
-            statLoss = meanLoss + std_loss
-            statLoss=MMDLoss(mem1_te.mean(0),mem1.mean(0))+MMDLoss(mem2_te.mean(0),mem2.mean(0))
-
+            statLoss, loss_clf, loss_swd = consolidated_loss(
+                z, gmm, readout, 1, y_batch.size(0)
+            )
+                
             zDER, _,_=snn_LSTM(xDERBatch)
             yDER=readout(zDER)
             derLoss=torch.pow(yDER-DERy,2).mean()+nn.CrossEntropyLoss()(yDER,yDERBatch)
