@@ -76,7 +76,36 @@ class Classifier(nn.Module):
 
     def forward(self, z):
         return self.fc(z)
+   
+def rbf_kernel(X, Y, kernel_mul=2.0, kernel_num=5):
+    dist_sq = torch.cdist(X, Y, p=2).pow(2)
+    # --- End of fix ---
+    with torch.no_grad():
+        total = torch.cat([X, Y], dim=0)
+        total_dist_sq = torch.cdist(total, total, p=2).pow(2)
+        bandwidth = total_dist_sq[total_dist_sq > 0].median()
     
+    bandwidth /= kernel_mul ** (kernel_num // 2)
+    bandwidth_list = [bandwidth * (kernel_mul**i) for i in range(kernel_num)]
+    
+    # RBF kernel formula
+    kernel_val = [torch.exp(-dist_sq / (bw + 1e-10)) for bw in bandwidth_list]
+    
+    return sum(kernel_val)
+
+def MMDLoss(source, target, kernel_mul=2.0, kernel_num=5, fix_sigma=None):
+    """
+    Calculates the MMD loss. This version handles different batch sizes.
+    """
+    # Calculate the three components of the MMD loss
+    xx = rbf_kernel(source, source, kernel_mul, kernel_num)
+    yy = rbf_kernel(target, target, kernel_mul, kernel_num)
+    xy = rbf_kernel(source, target, kernel_mul, kernel_num)
+
+    # The MMD loss is the mean of each component
+    loss = torch.mean(xx) + torch.mean(yy) - 2 * torch.mean(xy)
+    return loss
+
 
 snn_LSTM=Net_SLSTM_Extractor(inputSize=3,hiddenSize=50,numClasses=2).to(device)
 readout=Classifier(hiddenSize=50,numClasses=2).to(device)
@@ -120,7 +149,7 @@ for n in range(N_batch):
     Stat_tr[n,1] = loss.detach().cpu()
 
 
-    if n%N_eval==0 and n>2000:
+    if n%N_eval==0 and n>1000:
         
         ## FOR ADAPTATION, STORE MODEL'S PARAMETERS HERE
         #Parameter_before=deepcopy(list(...))
@@ -146,7 +175,8 @@ for n in range(N_batch):
             std_loss=torch.pow(mem1_te.std(0).mean(0)-mem1.std(0).mean(0),2).mean()+torch.pow(mem2_te.std(0).mean(0)-mem2.std(0).mean(0),2).mean()
             
             statLoss = meanLoss + std_loss
-            
+            statLoss=MMDLoss(mem1_te.mean(0),mem1.mean(0))+MMDLoss(mem2_te.mean(0),mem2.mean(0))
+
             zDER, _,_=snn_LSTM(xDERBatch)
             yDER=readout(zDER)
             derLoss=torch.pow(yDER-DERy,2).mean()+nn.CrossEntropyLoss()(yDER,yDERBatch)
@@ -173,10 +203,10 @@ for n in range(N_batch):
 
         snn_LSTM.load_state_dict(snn_lstm_state_before)
         readout.load_state_dict(readout_state_before)
-
         print('Training :', n, Stat_tr[n-N_eval:n,:].mean(0))
         print('Testing :', n, Stat_te[ind_help,0,:], Stat_te[ind_help,1,:], Stat_te[ind_help,2,:])
         print("Train Dataset after Adaption", n, Stat_tr_ad[ind_help,:])
+        
         
         ind_help+=1
    
