@@ -537,7 +537,7 @@ def SubjectChecker(loss_fn,i,encode=0):
     DERSamples=extractGesturePerSession(trainListDataset)
     TTASamples=extractGesturePerSession(testListDataset)
     
-    TTALoader=DataLoader(TTASamples,batch_size=batchSize,shuffle=True)
+    TTALoader=DataLoader(TTASamples,batch_size=len(TTASamples),shuffle=True)
     DERLoader=DataLoader(DERSamples,batch_size=len(DERSamples),shuffle=True)
     
     derBuffer=DERBuffer(device)

@@ -285,7 +285,6 @@ def TTA(encoder,classifier,der_buffer,dataLoader,ttaLoader, adaptOpt,alpha=1,bet
         #stdLoss=torch.pow(mem1_te.std(0).mean(0)-der_buffer.mem1.std(0).mean(0),2).mean()+torch.pow(mem2_te.std(0).mean(0)-der_buffer.mem2.std(0).mean(0),2).mean()
         statLoss = MMDLoss(mem1_te.mean(0),der_buffer.mem1.mean(0)) + MMDLoss(mem2_te.mean(0),der_buffer.mem2.mean(0))
         #statLoss=stdLoss+meanLoss
-        statLosses.append(statLoss.clone().detach())
         zDER, _,_=encoder(der_buffer.x)
         yDER=classifier(zDER)
         derLoss=torch.pow(yDER-der_buffer.yComp,2).mean()+nn.CrossEntropyLoss()(yDER,der_buffer.y)
@@ -296,6 +295,7 @@ def TTA(encoder,classifier,der_buffer,dataLoader,ttaLoader, adaptOpt,alpha=1,bet
         acc, loss = testNetwork(encoder, classifier, dataLoader, lossFn)
         ttaAcc.append(acc)
         ttaLoss.append(loss)
+        statLosses.append(statLoss.clone().detach())
         derLosses.append(derLoss.clone().detach())
     results = {
          'loss':ttaLoss,
@@ -421,7 +421,7 @@ def SubjectChecker(loss_fn,i,encode=0):
     DERSamples=extractGesturePerSession(trainListDataset)
     TTASamples=extractGesturePerSession(testListDataset)
     
-    TTALoader=DataLoader(TTASamples,batch_size=batchSize,shuffle=True)
+    TTALoader=DataLoader(TTASamples,batch_size=len(TTASamples),shuffle=True)
     DERLoader=DataLoader(DERSamples,batch_size=len(DERSamples),shuffle=True)
     
     derBuffer=DERBuffer(device)
@@ -457,7 +457,6 @@ def SubjectChecker(loss_fn,i,encode=0):
    
             
     
-numEpochs=15
 batchSize=128
 
     
