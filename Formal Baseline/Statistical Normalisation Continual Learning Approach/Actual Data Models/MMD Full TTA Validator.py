@@ -23,6 +23,7 @@ from sklearn.model_selection import train_test_split
 import snntorch as snn
 from snntorch import surrogate
 import copy
+from torch.cuda.amp import autocast, GradScaler
 # Data parameters
 numSubjects = 1  
 numGestures = 8
@@ -266,7 +267,9 @@ def MMDLoss(source, target, kernel_mul=2.0, kernel_num=5):
     return loss
 
 def TTA(encoder,classifier,der_buffer,dataLoader,ttaLoader, adaptOpt,alpha=1,beta=1,nAdaption=150):    #Need to make this not loop through the whole dataset, maybe make it take one example of each gesture type and use that?
+    scaler = GradScaler()
     beta=1
+    alpha=1
     ttaAcc,ttaLoss,statLosses,derLosses=[],[],[],[]
     lossFn=nn.CrossEntropyLoss()
     preAcc, preLoss = testNetwork(encoder, classifier, dataLoader, lossFn)
@@ -280,18 +283,23 @@ def TTA(encoder,classifier,der_buffer,dataLoader,ttaLoader, adaptOpt,alpha=1,bet
     for _ in range(nAdaption):
         x_batch,_=next(iter(ttaLoader))
         x_batch = x_batch.permute(1, 0, 2).to(device)
-        z, mem1_te, mem2_te=encoder(x_batch)
-        #meanLoss=torch.pow(mem1_te.mean(0).mean(0)-der_buffer.mem1.mean(0).mean(0),2).mean()+torch.pow(mem2_te.mean(0).mean(0)-der_buffer.mem2.mean(0).mean(0),2).mean()
-        #stdLoss=torch.pow(mem1_te.std(0).mean(0)-der_buffer.mem1.std(0).mean(0),2).mean()+torch.pow(mem2_te.std(0).mean(0)-der_buffer.mem2.std(0).mean(0),2).mean()
-        statLoss = MMDLoss(mem1_te.mean(0),der_buffer.mem1.mean(0)) + MMDLoss(mem2_te.mean(0),der_buffer.mem2.mean(0))
-        #statLoss=stdLoss+meanLoss
-        zDER, _,_=encoder(der_buffer.x)
-        yDER=classifier(zDER)
+        with autocast():
+          z, mem1_te, mem2_te=encoder(x_batch)
+          #meanLoss=torch.pow(mem1_te.mean(0).mean(0)-der_buffer.mem1.mean(0).mean(0),2).mean()+torch.pow(mem2_te.mean(0).mean(0)-der_buffer.mem2.mean(0).mean(0),2).mean()
+          #stdLoss=torch.pow(mem1_te.std(0).mean(0)-der_buffer.mem1.std(0).mean(0),2).mean()+torch.pow(mem2_te.std(0).mean(0)-der_buffer.mem2.std(0).mean(0),2).mean()
+          statLoss = MMDLoss(mem1_te.mean(0),der_buffer.mem1.mean(0)) + MMDLoss(mem2_te.mean(0),der_buffer.mem2.mean(0))
+          #statLoss=meanLoss
+          
+          zDER, _,_=encoder(der_buffer.x)
+          yDER=classifier(zDER)
         derLoss=torch.pow(yDER-der_buffer.yComp,2).mean()+nn.CrossEntropyLoss()(yDER,der_buffer.y)
+
+
         loss=alpha*statLoss+beta*derLoss
         adaptOpt.zero_grad()
-        loss.backward()
-        adaptOpt.step()
+        scaler.scale(loss).backward()
+        scaler.step(adaptOpt)
+        scaler.update()
         acc, loss = testNetwork(encoder, classifier, dataLoader, lossFn)
         ttaAcc.append(acc)
         ttaLoss.append(loss)

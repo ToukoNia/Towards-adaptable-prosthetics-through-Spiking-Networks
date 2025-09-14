@@ -25,6 +25,7 @@ from snntorch import surrogate
 import copy
 import copy
 from torch.distributions import Categorical, MultivariateNormal, MixtureSameFamily
+from torch.cuda.amp import autocast, GradScaler
 
 # Data parameters
 numSubjects = 1  
@@ -359,43 +360,51 @@ def MMDLoss(source, target, kernel_mul=2.0, kernel_num=5):
 
 def TTA(encoder,classifier,der_buffer,dataLoader,ttaLoader, adaptOpt,gmm,alpha=1,beta=1,nAdaption=100):    #Need to make this not loop through the whole dataset, maybe make it take one example of each gesture type and use that?
     beta=1
-    ttaAcc,ttaLoss,statlosses,derLosses=[],[],[],[]
+    alpha=3
+    ttaAcc,ttaLoss,statLosses,derLosses=[],[],[],[]
     lossFn=nn.CrossEntropyLoss()
     preAcc, preLoss = testNetwork(encoder, classifier, dataLoader, lossFn)
     ttaAcc.append(preAcc)
     ttaLoss.append(preLoss)
-    statlosses.append(0)
+    statLosses.append(0)
     derLosses.append(0)
-    
+    scaler = GradScaler()
     encoder.train()
     classifier.train()
+    derBatchSize=32
     for _ in range(nAdaption):
         x_batch,_=next(iter(ttaLoader))
         x_batch = x_batch.permute(1, 0, 2).to(device)
-        z, mem1_te, mem2_te=encoder(x_batch)
-        #meanLoss=torch.pow(mem1_te.mean(0).mean(0)-der_buffer.mem1.mean(0).mean(0),2).mean()+torch.pow(mem2_te.mean(0).mean(0)-der_buffer.mem2.mean(0).mean(0),2).mean()
-        #std_loss=torch.pow(mem1_te.std(0).mean(0)-der_buffer.mem1.std(0).mean(0),2).mean()+torch.pow(mem2_te.std(0).mean(0)-der_buffer.mem2.std(0).mean(0),2).mean()
-        #statLoss = MMDLoss(mem1_te.mean(0),der_buffer.mem1.mean(0)) + MMDLoss(mem2_te.mean(0),der_buffer.mem2.mean(0))
-        statLoss, loss_clf, loss_swd = consolidated_loss(
-            z, gmm, classifier, 1, x_batch.size(1)
-        )
-        zDER, _,_=encoder(der_buffer.x)
-        yDER=classifier(zDER)
+        with autocast():
+          z, mem1_te, mem2_te=encoder(x_batch)
+          #meanLoss=torch.pow(mem1_te.mean(0).mean(0)-der_buffer.mem1.mean(0).mean(0),2).mean()+torch.pow(mem2_te.mean(0).mean(0)-der_buffer.mem2.mean(0).mean(0),2).mean()
+          #std_loss=torch.pow(mem1_te.std(0).mean(0)-der_buffer.mem1.std(0).mean(0),2).mean()+torch.pow(mem2_te.std(0).mean(0)-der_buffer.mem2.std(0).mean(0),2).mean()
+          #statLoss = MMDLoss(mem1_te.mean(0),der_buffer.mem1.mean(0)) + MMDLoss(mem2_te.mean(0),der_buffer.mem2.mean(0))
+          
+          statLoss, loss_clf, loss_swd = consolidated_loss(
+              z, gmm, classifier, 1, x_batch.size(1)
+          )
+        
+        
+          zDER, _,_=encoder(der_buffer.x)
+          yDER=classifier(zDER)
         derLoss=torch.pow(yDER-der_buffer.yComp,2).mean()+nn.CrossEntropyLoss()(yDER,der_buffer.y)
+
+
         loss=alpha*statLoss+beta*derLoss
         adaptOpt.zero_grad()
-        loss.backward()
-        adaptOpt.step()
-        
-        statlosses.append(statLoss.clone().detach())
+        scaler.scale(loss).backward()
+        scaler.step(adaptOpt)
+        scaler.update()
         acc, loss = testNetwork(encoder, classifier, dataLoader, lossFn)
         ttaAcc.append(acc)
         ttaLoss.append(loss)
+        statLosses.append(statLoss.clone().detach())
         derLosses.append(derLoss.clone().detach())
     results = {
          'loss':ttaLoss,
-         'intra_session_acc':ttaAcc,
-         'statistical_loss': statlosses,
+         'intra_session_acc': ttaAcc,
+         'statistical_loss': statLosses,
          'der_loss': derLosses
      }
      
@@ -534,7 +543,7 @@ def SubjectChecker(loss_fn,i,encode=0):
         testListDataset = [normaliseData.forward(ds) for ds in testListDataset]
         trainListDataset=[normaliseData.forward(ds) for ds in trainListDataset]
     
-    DERSamples=extractGesturePerSession(trainListDataset)
+    DERSamples=extractGesturePerSession(trainListDataset[:5])
     TTASamples=extractGesturePerSession(testListDataset)
     
     TTALoader=DataLoader(TTASamples,batch_size=len(TTASamples),shuffle=True)
@@ -563,7 +572,7 @@ def SubjectChecker(loss_fn,i,encode=0):
     print(f"Created combined testDataIntra with {len(testDataIntra)} windows.")
     gmm=create_source_gmm(encoder, trainData, device)
     
-    adaptOpt=torch.optim.Adam(params=list(encoder.parameters())+list(classifier.parameters()),lr=1e-3)
+    adaptOpt=torch.optim.Adam(params=list(encoder.parameters())+list(classifier.parameters()),lr=1e-4)
   
     history=TTATester(encoder, classifier, derBuffer, testLoaderIntra, TTALoader, adaptOpt,gmm)
     results_df = pd.DataFrame(history)
