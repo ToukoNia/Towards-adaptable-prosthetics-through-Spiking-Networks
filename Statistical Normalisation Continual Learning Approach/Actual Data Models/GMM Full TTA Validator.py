@@ -358,9 +358,7 @@ def MMDLoss(source, target, kernel_mul=2.0, kernel_num=5):
     loss = torch.mean(xx) + torch.mean(yy) - 2 * torch.mean(xy)
     return loss
 
-def TTA(encoder,classifier,der_buffer,dataLoader,ttaLoader, adaptOpt,gmm,alpha=1,beta=1,nAdaption=100):    #Need to make this not loop through the whole dataset, maybe make it take one example of each gesture type and use that?
-    beta=1
-    alpha=3
+def TTA(encoder,classifier,der_buffer,dataLoader,ttaLoader, adaptOpt,gmm,alpha=1,beta=1,nAdaption=150):    #Need to make this not loop through the whole dataset, maybe make it take one example of each gesture type and use that?
     ttaAcc,ttaLoss,statLosses,derLosses=[],[],[],[]
     lossFn=nn.CrossEntropyLoss()
     preAcc, preLoss = testNetwork(encoder, classifier, dataLoader, lossFn)
@@ -371,7 +369,6 @@ def TTA(encoder,classifier,der_buffer,dataLoader,ttaLoader, adaptOpt,gmm,alpha=1
     scaler = GradScaler()
     encoder.train()
     classifier.train()
-    derBatchSize=32
     for _ in range(nAdaption):
         x_batch,_=next(iter(ttaLoader))
         x_batch = x_batch.permute(1, 0, 2).to(device)
@@ -523,6 +520,27 @@ def create_source_gmm(encoder, trainData, device):
     gmm.fit(all_latents, all_labels)
     return gmm
 
+def plotMultiResults(histories,subjectID):
+    plt.style.use('seaborn-whitegrid')    
+    fig, axes = plt.subplots(3, 4, figsize=(16, 10), sharex=True)
+    cKeys = ['loss', 'intra_session_acc', 'statistical_loss', 'der_loss']
+    cTitles = ['Model Loss', 'Model Accuracy', 'Statistic Loss', 'DER Loss']
+    yLabels = ['Loss', 'Accuracy', 'Loss Value', 'Loss Value']
+    
+    for i, df in enumerate(histories): 
+        for j, key in enumerate(cKeys):
+            ax = axes[i, j]
+            ax.plot(df[key], color='black')
+            #reduce clutter
+            if i == 0:
+                ax.set_title(cTitles[j], fontsize=12)
+            elif i == 2:
+                ax.set_xlabel('Adaption Steps')
+            ax.set_ylabel(yLabels[j])
+    plt.tight_layout()
+    # Save the figure.
+    plt.savefig(f"subject_{subjectID}_training_results.png")
+
 def SubjectChecker(loss_fn,i,encode=0):
 
     matFilePaths=fileFinder(r'/home/coa23nt/EMG-SNN/Data/DB6_s%s_a'%i)+fileFinder(r'/home/coa23nt/EMG-SNN/Data/DB6_s%s_b'%i)
@@ -544,9 +562,7 @@ def SubjectChecker(loss_fn,i,encode=0):
         trainListDataset=[normaliseData.forward(ds) for ds in trainListDataset]
     
     DERSamples=extractGesturePerSession(trainListDataset[:5])
-    TTASamples=extractGesturePerSession(testListDataset)
     
-    TTALoader=DataLoader(TTASamples,batch_size=len(TTASamples),shuffle=True)
     DERLoader=DataLoader(DERSamples,batch_size=len(DERSamples),shuffle=True)
     
     derBuffer=DERBuffer(device)
@@ -564,22 +580,34 @@ def SubjectChecker(loss_fn,i,encode=0):
     derBuffer.mem1 = mem1_der.clone().detach()
     derBuffer.mem2 = mem2_der.clone().detach()
     
-    
-    #trainData,testDataInter= loadAndSplitPerSession(dataPaths) 
-    testLoaderIntra=DataLoader(testDataIntra,batch_size=batchSize,shuffle=False)
-    #testLoaderInter=DataLoader(testDataInter,batch_size=batchSize,shuffle=False)
-    print(f"Created TTASamples dataset with {len(TTASamples)} windows.")
-    print(f"Created combined testDataIntra with {len(testDataIntra)} windows.")
+    histories=[]
+    #Saves the entwork
+    encoderStateSave = copy.deepcopy(encoder.state_dict())
+    classifierStateSave = copy.deepcopy(classifier.state_dict())
     gmm=create_source_gmm(encoder, trainData, device)
+
+    for testList in testListDataset:
+        TTASamples=extractOneOfEachGesture(testList)
+        TTALoader=DataLoader(TTASamples,batch_size=len(TTASamples),shuffle=True)
+        testLoaderIntra=DataLoader(testList,batch_size=batchSize,shuffle=False)
+        print(f"Created TTASamples dataset with {len(TTASamples)} windows.")
+        print(f"Created combined testDataIntra with {len(testDataIntra)} windows.")
+        
+        #New adapt optimiser, then get results
+        adaptOpt=torch.optim.Adam(params=list(encoder.parameters())+list(classifier.parameters()),lr=1e-3)
+        history=TTATester(encoder, classifier, derBuffer, testLoaderIntra, TTALoader, adaptOpt,gmm)
+        results_df = pd.DataFrame(history)
+        histories.append(results_df)
+        
+        #Load last states
+        encoder.load_state_dict(encoderStateSave)
+        classifier.load_state_dict(classifierStateSave)
+    plotMultiResults(histories,i)
+
+    combined_df = pd.concat(histories, ignore_index=True)
     
-    adaptOpt=torch.optim.Adam(params=list(encoder.parameters())+list(classifier.parameters()),lr=1e-4)
-  
-    history=TTATester(encoder, classifier, derBuffer, testLoaderIntra, TTALoader, adaptOpt,gmm)
-    results_df = pd.DataFrame(history)
-    results_df.to_csv(f"subject_{i}_training_history.csv", index_label="Adaption Step")
+    combined_df.to_csv(f"subject_{i}_training_history.csv", index_label="Adaption Step")
     print(f"\nResults for subject {i} saved to subject_{i}_training_history.csv")
-    plot_results(history,i)
-   
             
     
 numEpochs=15
