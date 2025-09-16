@@ -315,45 +315,26 @@ def TTA(encoder,classifier,der_buffer,dataLoader,ttaLoader, adaptOpt,alpha=1,bet
     return results 
 
         
-   
-def plot_results(history, subject_id):
-    #Plots training and validation metrics and saves the figure.
-    df = pd.DataFrame(history)
-    
+def plotMultiResults(histories,subjectID):
     plt.style.use('seaborn-whitegrid')    
-    fig, (ax1, ax2, ax3,ax4) = plt.subplots(1, 4, figsize=(15, 6))
+    fig, axes = plt.subplots(3, 4, figsize=(16, 10), sharex=True)
+    cKeys = ['loss', 'intra_session_acc', 'statistical_loss', 'der_loss']
+    cTitles = ['Model Loss', 'Model Accuracy', 'Statistic Loss', 'DER Loss']
+    yLabels = ['Loss', 'Accuracy', 'Loss Value', 'Loss Value']
     
-    # Plotting Loss
-    ax1.plot(df['loss'], label='Intra-Session Test Loss', color='black')
-    ax1.set_title(f'Subject {subject_id} - Model Loss')
-    ax1.set_xlabel('Adaption Steps')
-    ax1.set_ylabel('Loss')
-    ax1.legend()
-    
-    # Plotting Accuracy
-    ax2.plot(df['intra_session_acc'], label='Intra-Session Test Accuracy', color='black')
-    ax2.set_title(f'Subject {subject_id} - Model Accuracy')
-    ax2.set_xlabel('Adaption Steps')
-    ax2.set_ylabel('Accuracy')
-    ax2.legend()
-    
-    #Plotting Statistical Loss
-    ax3.plot(df['statistical_loss'], label='TTA Loss Statistic', color='black')
-    ax3.set_title(f'Subject {subject_id} - Statistic Loss')
-    ax3.set_xlabel('Adaption Steps')
-    ax3.set_ylabel('Loss Value')
-    ax3.legend()
-    
-    #Plotting DER Loss
-    ax4.plot(df['der_loss'], label='DER Loss', color='black')
-    ax4.set_title(f'Subject {subject_id} - DER Loss')
-    ax4.set_xlabel('Adaption Steps')
-    ax4.set_ylabel('Loss Value')
-    ax4.legend()
-    
+    for i, df in enumerate(histories): 
+        for j, key in enumerate(cKeys):
+            ax = axes[i, j]
+            ax.plot(df[key], color='black')
+            #reduce clutter
+            if i == 0:
+                ax.set_title(cTitles[j], fontsize=12)
+            elif i == 2:
+                ax.set_xlabel('Adaption Steps')
+            ax.set_ylabel(yLabels[j])
     plt.tight_layout()
     # Save the figure.
-    plt.savefig(f"subject_{subject_id}_training_results.png")
+    plt.savefig(f"subject_{subjectID}_training_results.png")
 
     
 def createStratifiedSplit(fullDataset, testSize):
@@ -406,8 +387,8 @@ def loadModels(subjectID):
     snn_LSTM.eval()
     readout.eval()
     return snn_LSTM,readout
-def SubjectChecker(loss_fn,i,encode=0):
 
+def SubjectChecker(loss_fn,i,encode=0):
     matFilePaths=fileFinder(r'/home/coa23nt/EMG-SNN/Data/DB6_s%s_a'%i)+fileFinder(r'/home/coa23nt/EMG-SNN/Data/DB6_s%s_b'%i)
     dataPaths=matFilePaths[:7]
     targetDataPath=matFilePaths[7:]
@@ -427,9 +408,6 @@ def SubjectChecker(loss_fn,i,encode=0):
         trainListDataset=[normaliseData.forward(ds) for ds in trainListDataset]
     
     DERSamples=extractGesturePerSession(trainListDataset)
-    TTASamples=extractGesturePerSession(testListDataset)
-    
-    TTALoader=DataLoader(TTASamples,batch_size=len(TTASamples),shuffle=True)
     DERLoader=DataLoader(DERSamples,batch_size=len(DERSamples),shuffle=True)
     
     derBuffer=DERBuffer(device)
@@ -439,6 +417,7 @@ def SubjectChecker(loss_fn,i,encode=0):
     
     encoder.eval()
     classifier.eval()
+    #Calculate the DER values
     with torch.no_grad():
         z_der, mem1_der, mem2_der = encoder(derBuffer.x)
         output_der = classifier(z_der)
@@ -447,21 +426,34 @@ def SubjectChecker(loss_fn,i,encode=0):
     derBuffer.mem1 = mem1_der.clone().detach()
     derBuffer.mem2 = mem2_der.clone().detach()
     
+    histories=[]
+    #Saves the entwork
+    encoderStateSave = copy.deepcopy(encoder.state_dict())
+    classifierStateSave = copy.deepcopy(classifier.state_dict())
+    for testList in testListDataset:
+        TTASamples=extractOneOfEachGesture(testList)
+        TTALoader=DataLoader(TTASamples,batch_size=len(TTASamples),shuffle=True)
+        testLoaderIntra=DataLoader(testList,batch_size=batchSize,shuffle=False)
+        print(f"Created TTASamples dataset with {len(TTASamples)} windows.")
+        print(f"Created combined testDataIntra with {len(testDataIntra)} windows.")
+        
+        #New adapt optimiser, then get results
+        adaptOpt=torch.optim.Adam(params=list(encoder.parameters())+list(classifier.parameters()),lr=1e-3)
+        history=TTATester(encoder, classifier, derBuffer, testLoaderIntra, TTALoader, adaptOpt)
+        results_df = pd.DataFrame(history)
+        histories.append(results_df)
+        
+        #Load last states
+        encoder.load_state_dict(encoderStateSave)
+        classifier.load_state_dict(classifierStateSave)
+        
+    plotMultiResults(histories,i)
+
+    combined_df = pd.concat(histories, ignore_index=True)
     
-    #trainData,testDataInter= loadAndSplitPerSession(dataPaths) 
-    testLoaderIntra=DataLoader(testDataIntra,batch_size=batchSize,shuffle=False)
-    #testLoaderInter=DataLoader(testDataInter,batch_size=batchSize,shuffle=False)
-    print(f"Created TTASamples dataset with {len(TTASamples)} windows.")
-    print(f"Created combined testDataIntra with {len(testDataIntra)} windows.")
-    
-    
-    adaptOpt=torch.optim.Adam(params=list(encoder.parameters())+list(classifier.parameters()),lr=1e-3)
-  
-    history=TTATester(encoder, classifier, derBuffer, testLoaderIntra, TTALoader, adaptOpt)
-    results_df = pd.DataFrame(history)
-    results_df.to_csv(f"subject_{i}_training_history.csv", index_label="Adaption Step")
+    combined_df.to_csv(f"subject_{i}_training_history.csv", index_label="Adaption Step")
     print(f"\nResults for subject {i} saved to subject_{i}_training_history.csv")
-    plot_results(history,i)
+    
    
             
     
