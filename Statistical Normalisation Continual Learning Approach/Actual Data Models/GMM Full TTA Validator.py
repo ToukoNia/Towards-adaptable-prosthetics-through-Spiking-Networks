@@ -358,7 +358,7 @@ def MMDLoss(source, target, kernel_mul=2.0, kernel_num=5):
     loss = torch.mean(xx) + torch.mean(yy) - 2 * torch.mean(xy)
     return loss
 
-def TTA(encoder,classifier,der_buffer,dataLoader,ttaLoader, adaptOpt,gmm,alpha=1,beta=1,nAdaption=150):    #Need to make this not loop through the whole dataset, maybe make it take one example of each gesture type and use that?
+def TTA(encoder,classifier,der_buffer,dataLoader,ttaLoader, adaptOpt,gmm,alpha=3,beta=1,nAdaption=150):    #Need to make this not loop through the whole dataset, maybe make it take one example of each gesture type and use that?
     ttaAcc,ttaLoss,statLosses,derLosses=[],[],[],[]
     lossFn=nn.CrossEntropyLoss()
     preAcc, preLoss = testNetwork(encoder, classifier, dataLoader, lossFn)
@@ -561,7 +561,7 @@ def SubjectChecker(loss_fn,i,encode=0):
         testListDataset = [normaliseData.forward(ds) for ds in testListDataset]
         trainListDataset=[normaliseData.forward(ds) for ds in trainListDataset]
     
-    DERSamples=extractGesturePerSession(trainListDataset[:5])
+    DERSamples=extractGesturePerSession(trainListDataset)
     
     DERLoader=DataLoader(DERSamples,batch_size=len(DERSamples),shuffle=True)
     
@@ -594,7 +594,7 @@ def SubjectChecker(loss_fn,i,encode=0):
         print(f"Created combined testDataIntra with {len(testDataIntra)} windows.")
         
         #New adapt optimiser, then get results
-        adaptOpt=torch.optim.Adam(params=list(encoder.parameters())+list(classifier.parameters()),lr=1e-3)
+        adaptOpt=torch.optim.Adam(params=list(encoder.parameters())+list(classifier.parameters()),lr=1e-4)
         history=TTATester(encoder, classifier, derBuffer, testLoaderIntra, TTALoader, adaptOpt,gmm)
         results_df = pd.DataFrame(history)
         histories.append(results_df)
