@@ -135,7 +135,7 @@ def fileFinder(dataDirectory):
         
     return matFilePaths
 
-def trainNetwork(model,trainLoader,testLoader1,testLoader2,numEpochs,loss_fn,optimiser,doReset):
+def trainNetwork(model,trainLoader,testLoader1,numEpochs,loss_fn,optimiser,doReset):
     #Training Settings
     history = {
        'train_loss': [], 'train_acc': [],
@@ -170,12 +170,9 @@ def trainNetwork(model,trainLoader,testLoader1,testLoader2,numEpochs,loss_fn,opt
 
         
         testAccuracyIntra,testLossIntra=testNetwork(model,testLoader1,loss_fn,0)
-        testAccuracyInter,testLossInter=testNetwork(model,testLoader2,loss_fn,0)
         
         history['intra_session_acc'].append(testAccuracyIntra)
         history['intra_session_loss'].append(testLossIntra)
-        history['inter_session_acc'].append(testAccuracyInter)
-        history['inter_session_loss'].append(testLossInter)
     return history
 
 def testNetwork(model, testLoader,loss_fn,doReset):
@@ -252,10 +249,9 @@ def createStratifiedSplit(fullDataset, testSize):
 def SubjectChecker(model,loss_fn,i,encode=0):
 
     matFilePaths=fileFinder(r'/home/coa23nt/EMG-SNN/Data/DB6_s%s_a'%i)+fileFinder(r'/home/coa23nt/EMG-SNN/Data/DB6_s%s_b'%i)
-    dataPaths=matFilePaths[:7]
+    trainData=matFilePaths[:7]
     targetDataPath=matFilePaths[7:]
     testDataIntra=loadDataset(targetDataPath,doEncode=encode)
-    trainData,testDataInter= loadAndSplitPerSession(dataPaths) 
     
     
     if not encode:
@@ -264,11 +260,10 @@ def SubjectChecker(model,loss_fn,i,encode=0):
     
     trainLoader=DataLoader(trainData, batch_size=batchSize, shuffle=True)
     testLoaderIntra=DataLoader(testDataIntra,batch_size=batchSize,shuffle=False)
-    testLoaderInter=DataLoader(testDataInter,batch_size=batchSize,shuffle=False)
     
     #Load and run the network
     optimiser = torch.optim.Adam(model.parameters(), lr=1e-3)
-    history=trainNetwork(model,trainLoader,testLoaderIntra,testLoaderInter,numEpochs,loss_fn,optimiser,0)
+    history=trainNetwork(model,trainLoader,testLoaderIntra,numEpochs,loss_fn,optimiser,0)
     
     
     results_df = pd.DataFrame(history)
