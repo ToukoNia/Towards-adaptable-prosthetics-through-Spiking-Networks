@@ -164,18 +164,19 @@ device = torch.device("cuda") if torch.cuda.is_available() else torch.device("mp
 matFilePaths=[]
 for subjectID in range(1,11):
     normaliseData=DataNormaliser()
+    snn_LSTM = Net_SLSTM_Extractor(inputSize=14, hiddenSize=128, numClasses=8).to(device)
+    PATH = f"Models/Subject_{subjectID}_SLSTM_TAB"
+    
+    # 2. Load the entire dictionary object
+    checkpoint = torch.load(PATH)
+    
     print("Processing subject",subjectID)
     matFilePaths=fileFinder(r'..\..\Data\DB6_s%s_a' % subjectID)+fileFinder(r'..\..\Data\DB6_s%s_b' % subjectID)
     dataPaths=matFilePaths[:7]
     trainData=loadDataset(dataPaths)
     trainData=normaliseData.forwardTrain(trainData)
     trainLoader=DataLoader(trainData, batch_size=128, shuffle=True)
-     
-    snn_LSTM = Net_SLSTM_Extractor(inputSize=14, hiddenSize=128, numClasses=8).to(device)
-    PATH = f"Models/Subject_{subjectID}_SLSTM_TAB"
     
-    # 2. Load the entire dictionary object
-    checkpoint = torch.load(PATH)
     
     # 3. Load the state dictionaries into your model instances
     snn_LSTM.load_state_dict(checkpoint['encoder_state_dict'],strict=False)

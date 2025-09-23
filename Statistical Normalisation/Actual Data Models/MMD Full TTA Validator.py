@@ -390,6 +390,7 @@ def loadModels(subjectID):
 
 def SubjectChecker(loss_fn,i,encode=0):
     matFilePaths=fileFinder(r'/home/coa23nt/EMG-SNN/Data/DB6_s%s_a'%i)+fileFinder(r'/home/coa23nt/EMG-SNN/Data/DB6_s%s_b'%i)
+    matFilePaths.sort()
     dataPaths=matFilePaths[:7]
     targetDataPath=matFilePaths[7:]
     testDataIntra=loadDataset(targetDataPath,doEncode=encode)

@@ -79,7 +79,31 @@ class DataNormalizer():
         xNorm = (x - self.mean) / self.std
         return TensorDataset(xNorm, y)
 
+class TripletDataset(torch.utils.data.Dataset):
+    def __init__(self, dataset):
+        self.dataset = dataset
+        self.labels = self.dataset.tensors[1].numpy()
+        self.labelsSet = set(self.labels)
+        self.labelToIndices = {label: np.where(self.labels == label)[0] for label in self.labelsSet}
 
+    def __getitem__(self, index):
+        anchor, anchorLabelTensor = self.dataset[index]
+        anchorLabel = anchorLabelTensor.item()
+
+        positiveIndex = index
+        while positiveIndex == index:
+            positiveIndex = np.random.choice(self.labelToIndices[anchorLabel])
+        positive = self.dataset[positiveIndex][0]
+
+        negativeLabel = np.random.choice(list(self.labelsSet - {anchorLabel}))
+        negativeIndex = np.random.choice(self.labelToIndices[negativeLabel])
+        negative = self.dataset[negativeIndex][0]
+
+        return anchor, positive, negative, anchorLabelTensor
+
+    def __len__(self):
+        return len(self.dataset)
+    
 def loadDataset(matPaths, windowSize=windowSize, overlapR=0.5, doEncode=0):
     x, y = [], []
     stride = int((1 - overlapR) * windowSize)
@@ -167,7 +191,7 @@ def plotResults(history, subjectId):
     plt.savefig(f"subject_{subjectId}_training_results.png")
     plt.close(fig)
 
-def trainNetwork(encoder, classifier, trainLoader, testLoaders, numEpochs, lossFn, optimizer, device,scheduler):
+def trainNetwork(encoder, classifier, trainLoader, testLoaders, numEpochs, lossFn, lossFnContra, optimizer, device,scheduler,alpha=0.5):
     history = {
         'train_loss': [], 'train_acc': [],
         'test_loss_1': [], 'test_acc_1': [],
@@ -184,18 +208,26 @@ def trainNetwork(encoder, classifier, trainLoader, testLoaders, numEpochs, lossF
         classifier.train()
         totalLoss = 0
         correctPredictions = 0
-        for x, y in trainLoader:
-            x = x.permute(1, 0, 2).to(device)
-            y = y.to(device)
-            z,_,_ = encoder(x)
-            output = classifier(z)
-            loss = lossFn(output, y)
+        for anchor, positive, negative, anchorLabel in trainLoader:
+            anchor, pos, neg, label = anchor.permute(1,0,2).to(device), positive.permute(1,0,2).to(device), negative.permute(1,0,2).to(device), anchorLabel.to(device)
+
+            anchorZ, _,_ = encoder(anchor)
+            positiveZ, _,_= encoder(pos)
+            negativeZ, _,_ = encoder(neg)
+
+            lossContrastive = lossFnContra(anchorZ, positiveZ, negativeZ)
+            output = classifier(anchorZ)
+            lossClassification = lossFn(output, label)
+
+            loss = lossClassification + (alpha * lossContrastive)
+
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
+
             totalLoss += loss.item()
             _, predictions = torch.max(output, 1)
-            correctPredictions += (predictions == y).sum().item()
+            correctPredictions += (predictions == label).sum().item()
         
         currentAccuracy = (correctPredictions / len(trainLoader.dataset)) * 100
         history['train_loss'].append(totalLoss / len(trainLoader))
@@ -216,7 +248,6 @@ def trainNetwork(encoder, classifier, trainLoader, testLoaders, numEpochs, lossF
     return history,bestEncState,bestClassState
 
 def SubjectChecker(lossFn, i, encode=0):
-    # CHANGED: Logic to split files into 7 for training and 3 for testing
     matFilePaths = fileFinder(f'/home/coa23nt/EMG-SNN/Data/DB6_s{i}_a') + fileFinder(f'/home/coa23nt/EMG-SNN/Data/DB6_s{i}_b')
     matFilePaths.sort()
     dataPaths, targetDataPath = matFilePaths[:7], matFilePaths[7:]
@@ -228,17 +259,17 @@ def SubjectChecker(lossFn, i, encode=0):
         trainData = dataNormalizer.forwardTrain(trainData)
         testDatasets = [dataNormalizer.forward(ds) for ds in testDatasets]
     
-    trainLoader = DataLoader(trainData, batch_size=batchSize, shuffle=True)
+    tripletTrainData = TripletDataset(trainData)
+    trainLoader = DataLoader(tripletTrainData, batch_size=batchSize, shuffle=True)
     testLoaders = [DataLoader(ds, batch_size=batchSize, shuffle=False) for ds in testDatasets]
 
-    # CHANGED: Initialize models from scratch instead of loading them
     encoder = Net_SLSTM_Extractor(inputSize=numChannels).to(device)
     classifier = Classifier(numClasses=numGestures).to(device)
     
     params = list(encoder.parameters()) + list(classifier.parameters())
     optimizer = torch.optim.Adam(params=params, lr=1e-3)
     scheduler = ReduceLROnPlateau(optimizer, mode='max', factor=0.1, patience=5, verbose=True)
-    history,encoderState,classifierState = trainNetwork(encoder, classifier, trainLoader, testLoaders, numEpochs, lossFn, optimizer, device,scheduler)
+    history,encoderState,classifierState = trainNetwork(encoder, classifier, trainLoader, testLoaders, numEpochs, lossFn, lossFnContra, optimizer, device,scheduler)
     plotResults(history, i)
 
     model_state = {'encoder_state_dict': encoderState, 'classifier_state_dict': classifierState}
@@ -248,4 +279,5 @@ def SubjectChecker(lossFn, i, encode=0):
 # Main execution block
 device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
 lossFn = nn.CrossEntropyLoss()
+lossFnContra=nn.TripletMarginLoss(margin=1.0)
 SubjectChecker(lossFn, inp, encode=0)
