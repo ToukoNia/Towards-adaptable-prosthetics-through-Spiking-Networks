@@ -1,1 +1,0 @@
-lr=1e-2, beta=1, used MMD and Subject 1's data
