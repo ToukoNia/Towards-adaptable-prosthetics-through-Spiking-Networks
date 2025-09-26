@@ -1,0 +1,3 @@
+Contrastive Loss=0.25, generated fully trained model
+Alpha=1
+Beta=0.1
